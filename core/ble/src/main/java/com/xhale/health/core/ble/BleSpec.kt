@@ -1,0 +1,28 @@
+package com.xhale.health.core.ble
+
+import java.util.UUID
+
+object BleUuids {
+    // Services
+    val ENVIRONMENTAL_SENSING_SERVICE: UUID = UUID.fromString("0000181A-0000-1000-8000-00805F9B34FB")
+    val DEVICE_INFORMATION_SERVICE: UUID = UUID.fromString("0000180A-0000-1000-8000-00805F9B34FB")
+    val BATTERY_SERVICE: UUID = UUID.fromString("0000180F-0000-1000-8000-00805F9B34FB")
+
+    // Characteristics
+    val TEMPERATURE_CHAR: UUID = UUID.fromString("00002A6E-0000-1000-8000-00805F9B34FB")
+    val CO_CHAR: UUID = UUID.fromString("00002BD0-0000-1000-8000-00805F9B34FB")
+    val HUMIDITY_CHAR: UUID = UUID.fromString("00002A6F-0000-1000-8000-00805F9B34FB")
+    val SERIAL_NUMBER_CHAR: UUID = UUID.fromString("00002A25-0000-1000-8000-00805F9B34FB")
+    val FIRMWARE_REV_CHAR: UUID = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
+    val BATTERY_LEVEL_CHAR: UUID = UUID.fromString("00002A19-0000-1000-8000-00805F9B34FB")
+}
+
+val XHaleGattSpec = GattSpec(
+    serviceUuid = BleUuids.ENVIRONMENTAL_SENSING_SERVICE,
+    coChar = BleUuids.CO_CHAR,
+    tempChar = BleUuids.TEMPERATURE_CHAR,
+    batteryChar = BleUuids.BATTERY_LEVEL_CHAR,
+    serialChar = BleUuids.SERIAL_NUMBER_CHAR,
+    commandWriteChar = null
+)
+

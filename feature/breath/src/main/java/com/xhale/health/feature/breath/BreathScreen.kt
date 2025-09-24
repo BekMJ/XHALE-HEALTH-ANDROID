@@ -13,15 +13,28 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
+import com.xhale.health.core.ui.BatteryEstimator
 
 @Composable
 fun BreathRoute(viewModel: BreathViewModel) {
     val state by viewModel.state.collectAsState()
-    BreathScreen(state, onStart = { viewModel.startSampling(it) }, onStop = viewModel::stopSampling)
+    BreathScreen(
+        state = state, 
+        onStart = { viewModel.startSampling(it) }, 
+        onStop = viewModel::stopSampling,
+        onExport = viewModel::exportToCsv,
+        onClearResult = viewModel::clearExportResult
+    )
 }
 
 @Composable
-fun BreathScreen(state: BreathUiState, onStart: (Int) -> Unit, onStop: () -> Unit) {
+fun BreathScreen(
+    state: BreathUiState, 
+    onStart: (Int) -> Unit, 
+    onStop: () -> Unit,
+    onExport: () -> Unit,
+    onClearResult: () -> Unit
+) {
     var duration by remember { mutableStateOf(15) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -42,6 +55,53 @@ fun BreathScreen(state: BreathUiState, onStart: (Int) -> Unit, onStop: () -> Uni
         Spacer(Modifier.height(12.dp))
         Text("CO: ${state.coPpm?.let { String.format("%.2f", it) } ?: "--"} ppm")
         Text("Temp: ${state.temperatureC?.let { String.format("%.2f", it) } ?: "--"} °C")
+        val est = BatteryEstimator.estimate(state.batteryPercent)
+        Text("Battery: ${state.batteryPercent?.toString() ?: "--"}%${est?.let { ", ~" + String.format("%.0f", it.hoursRemaining) + "h" } ?: ""}")
+        
+        // Export section
+        if (state.points.isNotEmpty() && !state.isSampling) {
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = onExport,
+                    enabled = !state.isExporting
+                ) {
+                    Text(if (state.isExporting) "Exporting..." else "Export CSV")
+                }
+                if (state.sessionId.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text("Session: ${state.sessionId}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        
+        // Export result
+        state.exportResult?.let { result ->
+            Spacer(Modifier.height(8.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (result.startsWith("Exported")) 
+                        MaterialTheme.colorScheme.primaryContainer 
+                    else 
+                        MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = result,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onClearResult) {
+                        Text("Dismiss")
+                    }
+                }
+            }
+        }
+        
         Spacer(Modifier.height(12.dp))
 
         val co = state.points.mapIndexedNotNull { idx, p -> p.second.first?.let { Entry(idx.toFloat(), it.toFloat()) } }

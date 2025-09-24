@@ -18,11 +18,18 @@ data class BreathUiState(
     val isSampling: Boolean = false,
     val coPpm: Double? = null,
     val temperatureC: Double? = null,
+    val batteryPercent: Int? = null,
     val points: List<Pair<Long, Pair<Double?, Double?>>> = emptyList(),
+    val sessionId: String = "",
+    val isExporting: Boolean = false,
+    val exportResult: String? = null,
 )
 
 @HiltViewModel
-class BreathViewModel @Inject constructor(private val ble: BleRepository) : ViewModel() {
+class BreathViewModel @Inject constructor(
+    private val ble: BleRepository,
+    private val csvExportUtil: CsvExportUtil
+) : ViewModel() {
     private val _state = MutableStateFlow(BreathUiState())
     val state: StateFlow<BreathUiState> = _state
 
@@ -30,7 +37,16 @@ class BreathViewModel @Inject constructor(private val ble: BleRepository) : View
     private var collectJob: Job? = null
 
     fun startSampling(durationSec: Int) {
-        _state.update { it.copy(isSampling = true, remainingSec = durationSec, points = emptyList()) }
+        val sessionId = csvExportUtil.generateSessionId()
+        _state.update { 
+            it.copy(
+                isSampling = true, 
+                remainingSec = durationSec, 
+                points = emptyList(),
+                sessionId = sessionId,
+                exportResult = null
+            ) 
+        }
         collectJob?.cancel()
         collectJob = viewModelScope.launch {
             ble.liveData.collectLatest { live ->
@@ -39,6 +55,7 @@ class BreathViewModel @Inject constructor(private val ble: BleRepository) : View
                     s.copy(
                         coPpm = live.coPpm,
                         temperatureC = live.temperatureC,
+                        batteryPercent = live.batteryPercent,
                         points = s.points + (now to (live.coPpm to live.temperatureC))
                     )
                 }
@@ -57,6 +74,40 @@ class BreathViewModel @Inject constructor(private val ble: BleRepository) : View
     fun stopSampling() {
         tickerJob?.cancel(); collectJob?.cancel()
         _state.update { it.copy(isSampling = false) }
+    }
+    
+    fun exportToCsv() {
+        val currentState = _state.value
+        if (currentState.points.isEmpty()) return
+        
+        _state.update { it.copy(isExporting = true) }
+        
+        viewModelScope.launch {
+            val sampleData = currentState.points.map { (timestamp, data) ->
+                BreathSampleData(
+                    timestamp = timestamp,
+                    coPpm = data.first,
+                    temperatureC = data.second,
+                    sessionId = currentState.sessionId
+                )
+            }
+            
+            val result = csvExportUtil.exportToCsv(sampleData, currentState.sessionId)
+            
+            _state.update { 
+                it.copy(
+                    isExporting = false,
+                    exportResult = result.fold(
+                        onSuccess = { "Exported to Downloads: $it" },
+                        onFailure = { "Export failed: ${it.message}" }
+                    )
+                )
+            }
+        }
+    }
+    
+    fun clearExportResult() {
+        _state.update { it.copy(exportResult = null) }
     }
 }
 

@@ -4,7 +4,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.dagger.hilt.android")
     id("com.google.devtools.ksp")
+    // Google services plugin will be applied conditionally below if config present
 }
+
+// Detect google-services.json in common locations (module root or source sets)
+val googleServicesJsonPaths = listOf(
+    "google-services.json",
+    "src/main/google-services.json",
+    "src/debug/google-services.json",
+    "src/release/google-services.json"
+)
+val hasGoogleServices = googleServicesJsonPaths.map { file(it) }.any { it.exists() }
 
 android {
     namespace = "com.xhale.health"
@@ -18,6 +28,9 @@ android {
         versionName = "0.1.0"
 
         vectorDrawables.useSupportLibrary = true
+
+        // BuildConfig flag to gate Firebase-dependent flows at runtime
+        buildConfigField("boolean", "FIREBASE_ENABLED", if (hasGoogleServices) "true" else "false")
     }
 
     buildTypes {
@@ -29,8 +42,6 @@ android {
             )
         }
         debug {
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "+dev"
         }
     }
 
@@ -44,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -58,6 +70,12 @@ dependencies {
     implementation(project(":core:ui"))
     implementation(project(":feature:home"))
     implementation(project(":feature:breath"))
+    implementation(project(":core:firebase"))
+    implementation(project(":feature:auth"))
+
+    // Firebase
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-auth-ktx")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
     implementation(composeBom)
@@ -86,5 +104,10 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     testImplementation("junit:junit:4.13.2")
+}
+
+// Conditionally enable Firebase Google Services if google-services.json exists
+if (hasGoogleServices) {
+    apply(plugin = "com.google.gms.google-services")
 }
 

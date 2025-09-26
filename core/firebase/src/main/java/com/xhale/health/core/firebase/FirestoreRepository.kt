@@ -2,11 +2,12 @@ package com.xhale.health.core.firebase
 
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.WriteBatch
+import dagger.Lazy
 import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 
 data class BreathSession(
@@ -27,8 +28,9 @@ data class BreathDataPoint(
 
 @Singleton
 class FirestoreRepository @Inject constructor(
-    private val firestore: FirebaseFirestore,
-    private val auth: FirebaseAuth
+    private val firestoreLazy: Lazy<FirebaseFirestore>,
+    private val authLazy: Lazy<FirebaseAuth>,
+    @Named("firebase_enabled") private val firebaseEnabled: Boolean
 ) {
     
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
@@ -36,8 +38,9 @@ class FirestoreRepository @Inject constructor(
     }
 
     suspend fun saveBreathSession(session: BreathSession): Result<Unit> {
+        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
         return try {
-            val userId = auth.currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
+            val userId = authLazy.get().currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
             
             val sessionData = mapOf(
                 "sessionId" to session.sessionId,
@@ -55,7 +58,7 @@ class FirestoreRepository @Inject constructor(
                 }
             )
             
-            firestore.collection("users")
+            firestoreLazy.get().collection("users")
                 .document(userId)
                 .collection("sessions")
                 .document(session.sessionId)
@@ -69,10 +72,11 @@ class FirestoreRepository @Inject constructor(
     }
 
     suspend fun getBreathSessions(deviceId: String? = null): Result<List<BreathSession>> {
+        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
         return try {
-            val userId = auth.currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
+            val userId = authLazy.get().currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
             
-            var query = firestore.collection("users")
+            var query = firestoreLazy.get().collection("users")
                 .document(userId)
                 .collection("sessions")
                 .orderBy("startedAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
@@ -109,10 +113,11 @@ class FirestoreRepository @Inject constructor(
     }
 
     suspend fun deleteBreathSession(sessionId: String): Result<Unit> {
+        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
         return try {
-            val userId = auth.currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
+            val userId = authLazy.get().currentUser?.uid ?: return Result.failure(Exception("User not authenticated"))
             
-            firestore.collection("users")
+            firestoreLazy.get().collection("users")
                 .document(userId)
                 .collection("sessions")
                 .document(sessionId)

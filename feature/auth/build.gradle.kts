@@ -21,6 +21,13 @@ dependencies {
     implementation(project(":core:ui"))
     implementation(project(":core:firebase"))
 
+    // Hilt Navigation for Compose (needed for hiltViewModel())
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+
+    // Firebase
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-auth-ktx")
+
     val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")

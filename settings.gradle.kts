@@ -20,6 +20,8 @@ rootProject.name = "XHaleHealthAndroid"
 include(":app")
 include(":core:ble")
 include(":core:ui")
+include(":core:firebase")
 include(":feature:home")
 include(":feature:breath")
+include(":feature:auth")
 

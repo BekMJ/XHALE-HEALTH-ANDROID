@@ -6,6 +6,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.components.Legend
@@ -35,6 +37,7 @@ fun BreathScreen(
     onExport: () -> Unit,
     onClearResult: () -> Unit
 ) {
+    val context = LocalContext.current
     var duration by remember { mutableStateOf(15) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -75,7 +78,7 @@ fun BreathScreen(
             }
         }
         
-        // Export result
+        // Export / Analysis result
         state.exportResult?.let { result ->
             Spacer(Modifier.height(8.dp))
             Card(
@@ -83,7 +86,7 @@ fun BreathScreen(
                     containerColor = if (result.startsWith("Exported")) 
                         MaterialTheme.colorScheme.primaryContainer 
                     else 
-                        MaterialTheme.colorScheme.errorContainer
+                        MaterialTheme.colorScheme.secondaryContainer
                 )
             ) {
                 Row(
@@ -95,6 +98,18 @@ fun BreathScreen(
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f)
                     )
+                    if (state.lastExportUri != null && result.startsWith("Exported")) {
+                        TextButton(onClick = {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/csv"
+                                putExtra(Intent.EXTRA_STREAM, state.lastExportUri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(share, "Share CSV"))
+                        }) {
+                            Text("Share")
+                        }
+                    }
                     TextButton(onClick = onClearResult) {
                         Text("Dismiss")
                     }

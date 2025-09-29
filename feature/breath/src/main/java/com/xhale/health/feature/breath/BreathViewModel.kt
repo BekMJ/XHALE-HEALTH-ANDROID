@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xhale.health.core.ble.BleRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.xhale.health.core.firebase.FirestoreRepository
+import com.xhale.health.core.firebase.BreathSession
+import com.xhale.health.core.firebase.BreathDataPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,12 +26,15 @@ data class BreathUiState(
     val sessionId: String = "",
     val isExporting: Boolean = false,
     val exportResult: String? = null,
+    val lastExportUri: android.net.Uri? = null,
 )
 
 @HiltViewModel
 class BreathViewModel @Inject constructor(
     private val ble: BleRepository,
-    private val csvExportUtil: CsvExportUtil
+    private val csvExportUtil: CsvExportUtil,
+    private val analyzeBreath: AnalyzeBreathUseCase,
+    private val firestore: FirestoreRepository
 ) : ViewModel() {
     private val _state = MutableStateFlow(BreathUiState())
     val state: StateFlow<BreathUiState> = _state
@@ -74,6 +80,52 @@ class BreathViewModel @Inject constructor(
     fun stopSampling() {
         tickerJob?.cancel(); collectJob?.cancel()
         _state.update { it.copy(isSampling = false) }
+
+        // Perform analysis when sampling ends if we have enough points
+        val points = _state.value.points
+        if (points.size >= 5) {
+            viewModelScope.launch {
+                val window = points.map { (ts, pair) ->
+                    WindowPoint(
+                        timestampMs = ts,
+                        rRaw = (pair.first ?: 0.0),
+                        tC = (pair.second ?: 0.0),
+                        v = 3.7 // placeholder voltage unless available from BLE
+                    )
+                }
+                val baselines = analyzeBreath.deriveBaselines(window)
+                val result = analyzeBreath.execute(window, baselines)
+                _state.update { s ->
+                    s.copy(
+                        exportResult = "PPM: " + String.format("%.2f", result.estimatedPpm) +
+                            ", ΔT: " + String.format("%.2f", result.temperatureRiseC) +
+                            (if (result.flags.shortDuration) " (short)" else "") +
+                            (if (result.flags.smallTemperatureRise) " (low ΔT)" else "") +
+                            (if (result.flags.unstableBaseline) " (unstable baseline)" else "")
+                    )
+                }
+
+                // Save to Firestore if enabled and connected
+                val formattedStart = firestore.formatTimestamp(window.first().timestampMs)
+                val dataPoints = window.map { wp ->
+                    BreathDataPoint(
+                        timestamp = firestore.formatTimestamp(wp.timestampMs),
+                        coPpm = (wp.rRaw - baselines.rBase - 0.80 * (wp.tC - baselines.tBase)) / 2.55,
+                        temperatureC = wp.tC,
+                        batteryPercent = _state.value.batteryPercent
+                    )
+                }
+                val session = BreathSession(
+                    sessionId = _state.value.sessionId.ifEmpty { csvExportUtil.generateSessionId() },
+                    deviceId = _state.value.sessionId, // placeholder; inject actual device id from BLE state later
+                    userId = "",
+                    startedAt = formattedStart,
+                    durationSeconds = result.breathDurationSec,
+                    dataPoints = dataPoints
+                )
+                firestore.saveBreathSession(session)
+            }
+        }
     }
     
     fun exportToCsv() {
@@ -98,9 +150,10 @@ class BreathViewModel @Inject constructor(
                 it.copy(
                     isExporting = false,
                     exportResult = result.fold(
-                        onSuccess = { "Exported to Downloads: $it" },
+                        onSuccess = { "Exported to Downloads: ${it.first}" },
                         onFailure = { "Export failed: ${it.message}" }
-                    )
+                    ),
+                    lastExportUri = result.getOrNull()?.second
                 )
             }
         }

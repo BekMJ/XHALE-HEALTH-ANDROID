@@ -1,16 +1,20 @@
 package com.xhale.health.feature.auth
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.xhale.health.feature.auth.R
 
 @Composable
 fun AuthRoute(
@@ -65,6 +69,15 @@ fun AuthScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        Image(
+            painter = painterResource(id = R.drawable.signin_hero),
+            contentDescription = null,
+            modifier = Modifier
+                .size(160.dp),
+            contentScale = ContentScale.Fit
+        )
+
+        Spacer(Modifier.height(24.dp))
         Text(
             text = "XHale Health",
             style = MaterialTheme.typography.headlineLarge,

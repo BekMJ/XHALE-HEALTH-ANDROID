@@ -28,9 +28,9 @@
     <application
         android:name=".XHaleApp"
         android:allowBackup="true"
-        android:icon="@drawable/ic_stat_xhale"
+        android:icon="@drawable/ic_app_icon"
         android:label="XHale Health"
-        android:roundIcon="@drawable/ic_stat_xhale"
+        android:roundIcon="@drawable/ic_app_icon"
         android:supportsRtl="true"
         android:theme="@style/Theme.XHale">
 

@@ -17,4 +17,8 @@ object BreathModule {
     fun provideCsvExportUtil(@ApplicationContext context: Context): CsvExportUtil {
         return CsvExportUtil(context)
     }
+
+    @Provides
+    @Singleton
+    fun provideAnalyzeBreath(): AnalyzeBreathUseCase = AnalyzeBreathUseCase()
 }

@@ -46,7 +46,7 @@ import android.content.Intent
 import android.provider.Settings
 
 @Composable
-fun HomeRoute(viewModel: HomeViewModel, onNavigateToBreath: () -> Unit, onSignOut: () -> Unit) {
+fun HomeRoute(viewModel: HomeViewModel, onNavigateToBreath: () -> Unit, onNavigateToTrends: () -> Unit, onSignOut: () -> Unit) {
     val state by viewModel.state.collectAsState()
     HomeScreen(
         state = state,
@@ -54,6 +54,7 @@ fun HomeRoute(viewModel: HomeViewModel, onNavigateToBreath: () -> Unit, onSignOu
         onConnect = viewModel::onConnect,
         onDisconnect = viewModel::onDisconnect,
         onNavigateToBreath = onNavigateToBreath,
+        onNavigateToTrends = onNavigateToTrends,
         onSignOut = onSignOut,
     )
 }
@@ -65,6 +66,7 @@ fun HomeScreen(
     onConnect: (String) -> Unit,
     onDisconnect: () -> Unit,
     onNavigateToBreath: () -> Unit,
+    onNavigateToTrends: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     XHTheme {
@@ -203,12 +205,14 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(16.dp))
 
-                if (state.connectedDeviceId != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (state.connectedDeviceId != null) {
                         Button(onClick = onDisconnect) { Text("Disconnect") }
                         Spacer(Modifier.width(12.dp))
                         Button(onClick = onNavigateToBreath) { Text("Take Sample") }
+                        Spacer(Modifier.width(12.dp))
                     }
+                    Button(onClick = onNavigateToTrends) { Text("Weekly Trends") }
                 }
             }
         }

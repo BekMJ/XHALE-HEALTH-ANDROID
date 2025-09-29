@@ -2,6 +2,7 @@ package com.xhale.health.feature.breath
 
 import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,7 @@ class CsvExportUtil(private val context: Context) {
     suspend fun exportToCsv(
         data: List<BreathSampleData>,
         sessionId: String
-    ): Result<String> = withContext(Dispatchers.IO) {
+    ): Result<Pair<String, Uri>> = withContext(Dispatchers.IO) {
         try {
             val fileName = "breath_sample_${sessionId}_${System.currentTimeMillis()}.csv"
             
@@ -43,7 +44,7 @@ class CsvExportUtil(private val context: Context) {
                 writeCsvData(outputStream, data)
             }
             
-            Result.success(fileName)
+            Result.success(fileName to uri)
         } catch (e: Exception) {
             Result.failure(e)
         }

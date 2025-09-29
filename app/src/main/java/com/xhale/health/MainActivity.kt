@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import com.xhale.health.feature.home.HomeRoute
 import com.xhale.health.feature.home.HomeViewModel
+import com.xhale.health.feature.home.TrendsScreen
 import com.xhale.health.feature.breath.BreathRoute
 import com.xhale.health.feature.breath.BreathViewModel
 import com.xhale.health.core.ui.XHTheme
@@ -111,6 +112,7 @@ fun App() {
                         HomeRoute(
                             viewModel = homeVm,
                             onNavigateToBreath = { navController.navigate("breath") },
+                            onNavigateToTrends = { navController.navigate("trends") },
                             onSignOut = {
                                 vm.onSignOut()
                                 if (BuildConfig.FIREBASE_ENABLED) {
@@ -127,6 +129,9 @@ fun App() {
             composable("breath") {
                 val bvm: BreathViewModel = hiltViewModel()
                 BreathRoute(viewModel = bvm)
+            }
+            composable("trends") {
+                TrendsScreen()
             }
         }
     }

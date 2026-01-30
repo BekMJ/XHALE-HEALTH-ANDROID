@@ -29,8 +29,6 @@ android {
 
         vectorDrawables.useSupportLibrary = true
 
-        // BuildConfig flag to gate Firebase-dependent flows at runtime
-        buildConfigField("boolean", "FIREBASE_ENABLED", if (hasGoogleServices) "true" else "false")
     }
 
     buildTypes {

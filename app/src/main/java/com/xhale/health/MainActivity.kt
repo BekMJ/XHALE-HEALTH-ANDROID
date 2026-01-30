@@ -38,6 +38,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import javax.inject.Named
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -115,7 +116,7 @@ fun App() {
                             onNavigateToTrends = { navController.navigate("trends") },
                             onSignOut = {
                                 vm.onSignOut()
-                                if (BuildConfig.FIREBASE_ENABLED) {
+                                if (vm.isFirebaseEnabled) {
                                     navController.navigate("auth") { popUpTo("home") { inclusive = true } }
                                 }
                             }
@@ -144,8 +145,12 @@ data class StartupUiState(val startDestination: StartDestination = StartDestinat
 @HiltViewModel
 class StartupViewModel @Inject constructor(
     private val prefs: UserPrefsRepository,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    @Named("firebase_enabled") private val firebaseEnabled: Boolean
 ) : ViewModel() {
+    val isFirebaseEnabled: Boolean
+        get() = firebaseEnabled
+
     val state: StateFlow<StartupUiState> = combine(
         prefs.onboardingDone,
         prefs.disclaimerAccepted,
@@ -153,7 +158,7 @@ class StartupViewModel @Inject constructor(
     ) { onboardingDone, disclaimerAccepted, authState ->
         if (!onboardingDone) return@combine StartupUiState(StartDestination.Onboarding)
         if (!disclaimerAccepted) return@combine StartupUiState(StartDestination.Disclaimer)
-        if (BuildConfig.FIREBASE_ENABLED) {
+        if (firebaseEnabled) {
             if (authState.user == null) StartupUiState(StartDestination.Auth) else StartupUiState(StartDestination.Home)
         } else {
             StartupUiState(StartDestination.Home)
@@ -161,7 +166,7 @@ class StartupViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StartupUiState())
 
     fun onSignOut() {
-        if (BuildConfig.FIREBASE_ENABLED) {
+        if (firebaseEnabled) {
             // fire and forget
             viewModelScope.launch {
                 authRepository.signOut()

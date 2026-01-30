@@ -27,6 +27,7 @@ android {
 
 dependencies {
     implementation(project(":core:ble"))
+    implementation(project(":core:firebase"))
     implementation(project(":core:ui"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
@@ -42,6 +43,9 @@ dependencies {
     implementation("com.google.dagger:hilt-android:2.52")
     ksp("com.google.dagger:hilt-compiler:2.52")
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+
+    // MPAndroidChart for simple line chart
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     debugImplementation("androidx.compose.ui:ui-tooling")

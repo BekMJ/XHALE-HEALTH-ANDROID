@@ -15,7 +15,7 @@
 
 ## Firebase enablement (optional)
 - Place `app/src/main/google-services.json` from your Firebase project.
-- Rebuild: the build applies Google Services and sets `BuildConfig.FIREBASE_ENABLED=true` automatically.
+- Rebuild: the build applies Google Services; the app enables Firebase when `google_app_id` is present.
 - Fill Data safety for Auth and Firestore; add Privacy Policy URL.
 
 ## Release commands

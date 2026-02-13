@@ -22,26 +22,37 @@ class AuthRepository @Inject constructor(
     private val authLazy: Lazy<FirebaseAuth>,
     @Named("firebase_enabled") private val firebaseEnabled: Boolean
 ) {
+    private val firebaseNotConfiguredMessage =
+        "Firebase is not configured. Add app/google-services.json and rebuild."
+
     private val _authState = MutableStateFlow(AuthState())
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
     init {
         if (firebaseEnabled) {
-            // Lazy.get() is only invoked when Firebase is enabled
-            authLazy.get().addAuthStateListener { firebaseAuth ->
+            try {
+                // Lazy.get() is only invoked when Firebase is enabled
+                authLazy.get().addAuthStateListener { firebaseAuth ->
+                    _authState.value = AuthState(
+                        user = firebaseAuth.currentUser,
+                        isLoading = false,
+                        error = null
+                    )
+                }
+            } catch (_: Exception) {
                 _authState.value = AuthState(
-                    user = firebaseAuth.currentUser,
+                    user = null,
                     isLoading = false,
-                    error = null
+                    error = firebaseNotConfiguredMessage
                 )
             }
         } else {
-            _authState.value = AuthState(user = null, isLoading = false, error = null)
+            _authState.value = AuthState(user = null, isLoading = false, error = firebaseNotConfiguredMessage)
         }
     }
 
     suspend fun signIn(email: String, password: String): Result<Unit> {
-        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
+        if (!firebaseEnabled) return Result.failure(IllegalStateException(firebaseNotConfiguredMessage))
         return try {
             _authState.value = _authState.value.copy(isLoading = true, error = null)
             authLazy.get().signInWithEmailAndPassword(email, password).await()
@@ -53,7 +64,7 @@ class AuthRepository @Inject constructor(
     }
 
     suspend fun signUp(email: String, password: String): Result<Unit> {
-        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
+        if (!firebaseEnabled) return Result.failure(IllegalStateException(firebaseNotConfiguredMessage))
         return try {
             _authState.value = _authState.value.copy(isLoading = true, error = null)
             authLazy.get().createUserWithEmailAndPassword(email, password).await()
@@ -75,7 +86,7 @@ class AuthRepository @Inject constructor(
     }
 
     suspend fun resetPassword(email: String): Result<Unit> {
-        if (!firebaseEnabled) return Result.failure(IllegalStateException("Firebase disabled"))
+        if (!firebaseEnabled) return Result.failure(IllegalStateException(firebaseNotConfiguredMessage))
         return try {
             authLazy.get().sendPasswordResetEmail(email).await()
             Result.success(Unit)

@@ -19,6 +19,9 @@ data class HomeUiState(
     val bluetoothAvailable: Boolean = true,
     val devices: List<DiscoveredDevice> = emptyList(),
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
+    val isPreparingBaseline: Boolean = false,
+    val preparationSecondsLeft: Int = 0,
+    val isWarmupComplete: Boolean = false,
     val connectedDeviceId: String? = null,
     val coPpm: Double? = null,
     val temperatureC: Double? = null,
@@ -27,11 +30,20 @@ data class HomeUiState(
 )
 
 @HiltViewModel
-class HomeViewModel @Inject constructor(private val ble: BleRepository) : ViewModel() {
-    private fun <T1, T2, T3, T4, T5, T6, R> combine6(
-        f1: Flow<T1>, f2: Flow<T2>, f3: Flow<T3>, f4: Flow<T4>, f5: Flow<T5>, f6: Flow<T6>,
-        transform: suspend (T1, T2, T3, T4, T5, T6) -> R
-    ): Flow<R> = combine(arrayOf(f1, f2, f3, f4, f5, f6).toList()) { arr ->
+class HomeViewModel @Inject constructor(
+    private val ble: BleRepository
+) : ViewModel() {
+
+    private fun <T1, T2, T3, T4, T5, T6, T7, R> combine7(
+        f1: Flow<T1>,
+        f2: Flow<T2>,
+        f3: Flow<T3>,
+        f4: Flow<T4>,
+        f5: Flow<T5>,
+        f6: Flow<T6>,
+        f7: Flow<T7>,
+        transform: suspend (T1, T2, T3, T4, T5, T6, T7) -> R
+    ): Flow<R> = combine(arrayOf(f1, f2, f3, f4, f5, f6, f7).toList()) { arr ->
         @Suppress("UNCHECKED_CAST")
         transform(
             arr[0] as T1,
@@ -39,23 +51,28 @@ class HomeViewModel @Inject constructor(private val ble: BleRepository) : ViewMo
             arr[2] as T3,
             arr[3] as T4,
             arr[4] as T5,
-            arr[5] as T6
+            arr[5] as T6,
+            arr[6] as T7
         )
     }
 
-    val state: StateFlow<HomeUiState> = combine6(
+    val state: StateFlow<HomeUiState> = combine7(
         ble.isScanning,
         ble.bluetoothAvailable,
         ble.discoveredDevices,
         ble.connectionState,
         ble.connectedDevice,
-        ble.liveData
-    ) { scanning, bt, devices, conn, connected, live ->
+        ble.liveData,
+        ble.baselinePreparation
+    ) { scanning, bt, devices, conn, connected, live, prep ->
         HomeUiState(
             isScanning = scanning,
             bluetoothAvailable = bt,
             devices = devices,
             connectionState = conn,
+            isPreparingBaseline = prep.isPreparingBaseline,
+            preparationSecondsLeft = prep.preparationSecondsLeft,
+            isWarmupComplete = prep.isWarmupComplete,
             connectedDeviceId = connected?.deviceId,
             coPpm = live.coPpm,
             temperatureC = live.temperatureC,

@@ -11,13 +11,27 @@ data class DiscoveredDevice(
 
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
 
+data class BaselinePreparationState(
+    val isPreparingBaseline: Boolean = false,
+    val preparationSecondsLeft: Int = 0,
+    val isWarmupComplete: Boolean = false,
+    val baselineRawValue: Double? = null,
+    val baselineTemperatureC: Double? = null,
+    val baselineHumidityPercent: Double? = null,
+    val rawBatteryAdc: Double? = null,
+    val batteryVoltage: Double? = null,
+    val batteryCapacityMah: Double? = null,
+    val calculatedBatteryPercent: Int? = null
+)
+
 data class LiveSensorData(
     val coPpm: Double?,
     val temperatureC: Double?,
     val batteryPercent: Int?,
     val serialNumber: String?,
     val humidityPercent: Double? = null,
-    val firmwareRev: String? = null
+    val firmwareRev: String? = null,
+    val coRaw: Double? = null
 )
 
 data class GattSpec(

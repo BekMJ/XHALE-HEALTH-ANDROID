@@ -9,6 +9,7 @@ interface BleRepository {
     val connectionState: Flow<ConnectionState>
     val connectedDevice: Flow<DiscoveredDevice?>
     val liveData: Flow<LiveSensorData>
+    val baselinePreparation: Flow<BaselinePreparationState>
 
     suspend fun startScan()
     suspend fun stopScan()

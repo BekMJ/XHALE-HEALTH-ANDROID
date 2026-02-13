@@ -67,10 +67,19 @@ fun App() {
             }
         ) {
             composable("onboarding") {
-                OnboardingScreen(onDone = { navController.navigate("disclaimer") { popUpTo("onboarding") { inclusive = true } } })
+                OnboardingScreen(
+                    onDone = { navController.navigate("disclaimer") { popUpTo("onboarding") { inclusive = true } } },
+                    viewModel = hiltViewModel()
+                )
             }
             composable("disclaimer") {
-                DisclaimerScreen(onAccept = { navController.navigate("auth") { popUpTo("disclaimer") { inclusive = true } } })
+                DisclaimerScreen(
+                    onAccept = {
+                        val next = if (vm.isFirebaseEnabled) "auth" else "home"
+                        navController.navigate(next) { popUpTo("disclaimer") { inclusive = true } }
+                    },
+                    viewModel = hiltViewModel()
+                )
             }
             composable("auth") {
                 AuthRoute(onAuthSuccess = { navController.navigate("home") { popUpTo("auth") { inclusive = true } } })

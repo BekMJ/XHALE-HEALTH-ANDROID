@@ -23,6 +23,7 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -36,6 +37,10 @@ import java.util.UUID
 class AndroidBleRepository(private val context: Context) : BleRepository {
     private val TAG = "AndroidBleRepo"
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val warmupDelaySeconds = 20
+    private val baselineCaptureDelaySeconds = 7
+    private val warmupVoltageOffset = 4.67
+    private val warmupVoltageScale = 150.30
     private val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val adapter: BluetoothAdapter? get() = btManager.adapter
 
@@ -45,6 +50,10 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     private val devicesById = mutableMapOf<String, BluetoothDevice>()
     private val notificationQueue: ArrayDeque<Pair<java.util.UUID, java.util.UUID>> = ArrayDeque()
     private val lastUpdateMs = mutableMapOf<java.util.UUID, Long>()
+    private val notifyRecoveryAttempts = mutableMapOf<java.util.UUID, Int>()
+    private val maxNotifyRecoveryAttempts = 2
+    private var warmupJob: Job? = null
+    private var baselineCaptureJob: Job? = null
     @Volatile private var servicesDiscovered = false
     @Volatile private var discoveryAttempts = 0
 
@@ -63,11 +72,13 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     private val _connectedDevice = MutableStateFlow<DiscoveredDevice?>(null)
     override val connectedDevice: StateFlow<DiscoveredDevice?> = _connectedDevice.asStateFlow()
 
-    private val _liveData = MutableStateFlow(LiveSensorData(null, null, null, null, null, null))
+    private val _liveData = MutableStateFlow(LiveSensorData(null, null, null, null, null, null, null))
     override val liveData: StateFlow<LiveSensorData> = _liveData.asStateFlow()
+    private val _baselinePreparation = MutableStateFlow(BaselinePreparationState())
+    override val baselinePreparation: StateFlow<BaselinePreparationState> = _baselinePreparation.asStateFlow()
 
     private val notifyDescriptorUuid = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    // CO: firmware sends a 16-bit big-endian integer. Treat as ppm (no calibration).
+    // CO: firmware sends a 16-bit big-endian integer (raw ADC).
 
     private fun hasConnectPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= 31) {
@@ -153,6 +164,18 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         } ?: return
         _connectionState.value = ConnectionState.CONNECTING
         connected = device
+        warmupJob?.cancel()
+        baselineCaptureJob?.cancel()
+        _baselinePreparation.value = BaselinePreparationState()
+        _liveData.value = LiveSensorData(
+            coPpm = null,
+            temperatureC = null,
+            batteryPercent = null,
+            serialNumber = null,
+            humidityPercent = null,
+            firmwareRev = null,
+            coRaw = null
+        )
         gatt = device.connectGatt(context, false, gattCallback)
     }
 
@@ -162,8 +185,21 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         gatt?.close()
         gatt = null
         connected = null
+        notifyRecoveryAttempts.clear()
+        warmupJob?.cancel()
+        baselineCaptureJob?.cancel()
+        _baselinePreparation.value = BaselinePreparationState()
         _connectionState.value = ConnectionState.DISCONNECTED
         _connectedDevice.value = null
+        _liveData.value = LiveSensorData(
+            coPpm = null,
+            temperatureC = null,
+            batteryPercent = null,
+            serialNumber = null,
+            humidityPercent = null,
+            firmwareRev = null,
+            coRaw = null
+        )
     }
 
     override suspend fun writeCommandStartSampling() { /* not required */ }
@@ -184,6 +220,7 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 )
                 servicesDiscovered = false
                 discoveryAttempts = 0
+                startWarmupLifecycle()
                 if (Build.VERSION.SDK_INT >= 21) {
                     @Suppress("MissingPermission")
                     run { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
@@ -199,6 +236,9 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                     }
                 }
             } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
+                warmupJob?.cancel()
+                baselineCaptureJob?.cancel()
+                _baselinePreparation.value = BaselinePreparationState()
                 _connectionState.value = ConnectionState.DISCONNECTED
                 _connectedDevice.value = null
             }
@@ -225,11 +265,10 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 return
             }
             servicesDiscovered = true
-            // Queue notifications sequentially to improve CCCD reliability (search across any service)
+            // Enable BAS on discovery; CO/temp/humidity are enabled after warmup.
+            notifyRecoveryAttempts.clear()
             notificationQueue.clear()
-            enqueueNotifyIfPresent(gatt, BleUuids.CO_CHAR)
-            enqueueNotifyIfPresent(gatt, BleUuids.TEMPERATURE_CHAR)
-            enqueueNotifyIfPresent(gatt, BleUuids.HUMIDITY_CHAR)
+            enqueueNotifyIfPresent(gatt, BleUuids.BATTERY_LEVEL_CHAR)
             Log.d(TAG, "Services discovered. Enabling notify for ${notificationQueue.size} chars…")
             // Small delay before starting CCCD writes improves reliability on some devices
             scope.launch {
@@ -239,7 +278,11 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             // Read static info (try standard services, else any service containing the char)
             readCharacteristicAnywhere(gatt, BleUuids.SERIAL_NUMBER_CHAR)
             readCharacteristicAnywhere(gatt, BleUuids.FIRMWARE_REV_CHAR)
-            readCharacteristicAnywhere(gatt, BleUuids.BATTERY_LEVEL_CHAR)
+            scope.launch {
+                // Initial BAS read is delayed to avoid stale early values.
+                delay(10_000)
+                readCharacteristicAnywhere(gatt, BleUuids.BATTERY_LEVEL_CHAR)
+            }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
@@ -256,14 +299,26 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             val ch = descriptor.characteristic
             Log.d(TAG, "CCCD written for ${ch.uuid}, status=$status. Reading once to prime UI…")
             if (hasConnectPermission()) gatt.readCharacteristic(ch)
-            // Fallback: if no updates in 5s, try re-enable + read again
             val targetUuid = ch.uuid
+            if (targetUuid == BleUuids.BATTERY_LEVEL_CHAR) {
+                // BAS often doesn't push notifications; rely on the delayed read path instead.
+                processNextNotification(gatt)
+                return
+            }
+
+            // Fallback: if no updates in 5s, try re-enable + read again (bounded retries)
             val serviceUuid = ch.service?.uuid ?: BleUuids.ENVIRONMENTAL_SENSING_SERVICE
             scope.launch {
                 delay(5000)
                 val last = lastUpdateMs[targetUuid] ?: 0L
                 if (System.currentTimeMillis() - last >= 5000) {
-                    Log.w(TAG, "No updates for $targetUuid after 5s. Re-enabling notify and re-reading…")
+                    val attempts = notifyRecoveryAttempts[targetUuid] ?: 0
+                    if (attempts >= maxNotifyRecoveryAttempts) return@launch
+                    notifyRecoveryAttempts[targetUuid] = attempts + 1
+                    Log.w(
+                        TAG,
+                        "No updates for $targetUuid after 5s. Re-enabling notify and re-reading (attempt ${attempts + 1}/$maxNotifyRecoveryAttempts)…"
+                    )
                     enableNotifications(gatt, serviceUuid, targetUuid)
                     delay(150)
                     if (hasConnectPermission()) gatt.readCharacteristic(ch)
@@ -274,11 +329,13 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     }
 
     @SuppressLint("MissingPermission")
-    private fun enableNotifications(gatt: BluetoothGatt, serviceUuid: java.util.UUID, charUuid: java.util.UUID) {
-        val ch = gatt.getService(serviceUuid)?.getCharacteristic(charUuid) ?: return
-        gatt.setCharacteristicNotification(ch, true)
-        val desc = ch.getDescriptor(notifyDescriptorUuid) ?: return
+    private fun enableNotifications(gatt: BluetoothGatt, serviceUuid: java.util.UUID, charUuid: java.util.UUID): Boolean {
+        val ch = gatt.getService(serviceUuid)?.getCharacteristic(charUuid) ?: return false
+        val supportsNotify = (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
         val supportsIndicate = (ch.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+        if (!supportsNotify && !supportsIndicate) return false
+        gatt.setCharacteristicNotification(ch, true)
+        val desc = ch.getDescriptor(notifyDescriptorUuid) ?: return false
         val value = if (supportsIndicate) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         if (Build.VERSION.SDK_INT >= 33) {
             gatt.writeDescriptor(desc, value)
@@ -289,6 +346,7 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 gatt.writeDescriptor(desc)
             }
         }
+        return true
     }
 
     @SuppressLint("MissingPermission")
@@ -296,7 +354,11 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         val next = notificationQueue.removeFirstOrNull() ?: return
         scope.launch {
             delay(150)
-            enableNotifications(gatt, next.first, next.second)
+            val started = enableNotifications(gatt, next.first, next.second)
+            if (!started) {
+                // Move to next if the characteristic has no CCCD/notify support.
+                processNextNotification(gatt)
+            }
         }
     }
 
@@ -334,6 +396,7 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() else return
                 val tempC = raw / 100.0
                 lastUpdateMs[ch.uuid] = System.currentTimeMillis()
+                notifyRecoveryAttempts[ch.uuid] = 0
                 _liveData.update { it.copy(temperatureC = tempC) }
             }
             BleUuids.HUMIDITY_CHAR -> {
@@ -343,16 +406,18 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() and 0xFFFF else return
                 val humidity = raw / 100.0
                 lastUpdateMs[ch.uuid] = System.currentTimeMillis()
+                notifyRecoveryAttempts[ch.uuid] = 0
                 _liveData.update { it.copy(humidityPercent = humidity) }
             }
             BleUuids.CO_CHAR -> {
-                // uint16 BE – treat directly as ppm
+                // uint16 BE raw ADC; keep raw and mirrored display value.
                 val data = ch.getValue() ?: return
                 val bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() and 0xFFFF else return
-                val ppm = raw.toDouble()
+                val rawValue = raw.toDouble()
                 lastUpdateMs[ch.uuid] = System.currentTimeMillis()
-                _liveData.update { it.copy(coPpm = ppm) }
+                notifyRecoveryAttempts[ch.uuid] = 0
+                _liveData.update { it.copy(coPpm = rawValue, coRaw = rawValue) }
             }
             BleUuids.SERIAL_NUMBER_CHAR -> {
                 val data = ch.getValue() ?: return
@@ -367,9 +432,117 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             BleUuids.BATTERY_LEVEL_CHAR -> {
                 val data = ch.getValue()
                 val level = data?.firstOrNull()?.toInt()?.coerceIn(0, 100)
+                if (level != null && level <= 10) {
+                    Log.w(TAG, "Low battery level reported by BAS: $level%")
+                }
                 _liveData.update { it.copy(batteryPercent = level) }
             }
         }
+    }
+
+    private fun startWarmupLifecycle() {
+        warmupJob?.cancel()
+        baselineCaptureJob?.cancel()
+        warmupJob = scope.launch {
+            for (remaining in warmupDelaySeconds downTo 1) {
+                _baselinePreparation.value = BaselinePreparationState(
+                    isPreparingBaseline = true,
+                    preparationSecondsLeft = remaining,
+                    isWarmupComplete = false,
+                    baselineRawValue = _baselinePreparation.value.baselineRawValue,
+                    baselineTemperatureC = _baselinePreparation.value.baselineTemperatureC,
+                    baselineHumidityPercent = _baselinePreparation.value.baselineHumidityPercent,
+                    rawBatteryAdc = _baselinePreparation.value.rawBatteryAdc,
+                    batteryVoltage = _baselinePreparation.value.batteryVoltage,
+                    batteryCapacityMah = _baselinePreparation.value.batteryCapacityMah,
+                    calculatedBatteryPercent = _baselinePreparation.value.calculatedBatteryPercent
+                )
+                delay(1_000)
+            }
+            _baselinePreparation.update {
+                it.copy(
+                    isPreparingBaseline = false,
+                    preparationSecondsLeft = 0,
+                    isWarmupComplete = true
+                )
+            }
+
+            // Mirrors iOS behavior where internal sampling starts after warmup.
+            writeCommandStartSampling()
+            startSensorStreaming()
+
+            baselineCaptureJob = launch {
+                delay(baselineCaptureDelaySeconds * 1_000L)
+                captureWarmupBaseline()
+            }
+        }
+    }
+
+    private fun captureWarmupBaseline() {
+        val raw = _liveData.value.coRaw ?: _liveData.value.coPpm ?: return
+        val temp = _liveData.value.temperatureC
+        val humidity = _liveData.value.humidityPercent
+        val voltage = (raw + warmupVoltageOffset) / warmupVoltageScale
+        val percent = estimateCr2032SocPercent(voltage)
+        val capacityMah = 220.0 * (percent / 100.0)
+        _baselinePreparation.update {
+            it.copy(
+                baselineRawValue = raw,
+                baselineTemperatureC = temp,
+                baselineHumidityPercent = humidity,
+                rawBatteryAdc = raw,
+                batteryVoltage = voltage,
+                batteryCapacityMah = capacityMah,
+                calculatedBatteryPercent = percent
+            )
+        }
+    }
+
+    private fun startSensorStreaming() {
+        val activeGatt = gatt ?: return
+        notificationQueue.clear()
+        enqueueNotifyIfPresent(activeGatt, BleUuids.CO_CHAR)
+        enqueueNotifyIfPresent(activeGatt, BleUuids.TEMPERATURE_CHAR)
+        enqueueNotifyIfPresent(activeGatt, BleUuids.HUMIDITY_CHAR)
+        Log.d(TAG, "Warmup complete. Enabling sensor notifications for ${notificationQueue.size} chars…")
+        scope.launch {
+            delay(200)
+            processNextNotification(activeGatt)
+            delay(200)
+            readCharacteristicAnywhere(activeGatt, BleUuids.CO_CHAR)
+            readCharacteristicAnywhere(activeGatt, BleUuids.TEMPERATURE_CHAR)
+            readCharacteristicAnywhere(activeGatt, BleUuids.HUMIDITY_CHAR)
+        }
+    }
+
+    private fun estimateCr2032SocPercent(voltage: Double): Int {
+        val curve = listOf(
+            3.00 to 100,
+            2.95 to 95,
+            2.90 to 88,
+            2.85 to 78,
+            2.80 to 66,
+            2.75 to 52,
+            2.70 to 38,
+            2.65 to 26,
+            2.60 to 16,
+            2.55 to 9,
+            2.50 to 4,
+            2.45 to 2,
+            2.40 to 0
+        )
+        if (voltage >= curve.first().first) return curve.first().second
+        if (voltage <= curve.last().first) return curve.last().second
+
+        for (i in 0 until curve.lastIndex) {
+            val (vHigh, pHigh) = curve[i]
+            val (vLow, pLow) = curve[i + 1]
+            if (voltage <= vHigh && voltage >= vLow) {
+                val ratio = (voltage - vLow) / (vHigh - vLow)
+                return (pLow + (pHigh - pLow) * ratio).toInt().coerceIn(0, 100)
+            }
+        }
+        return 0
     }
 }
 

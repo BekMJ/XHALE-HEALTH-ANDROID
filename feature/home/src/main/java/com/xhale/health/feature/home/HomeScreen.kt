@@ -205,11 +205,22 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(16.dp))
 
+                if (state.connectedDeviceId != null && state.isPreparingBaseline) {
+                    Text(
+                        text = "Preparing baseline... ${state.preparationSecondsLeft}s",
+                        color = Color.White
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (state.connectedDeviceId != null) {
                         Button(onClick = onDisconnect) { Text("Disconnect") }
                         Spacer(Modifier.width(12.dp))
-                        Button(onClick = onNavigateToBreath) { Text("Take Sample") }
+                        Button(
+                            onClick = onNavigateToBreath,
+                            enabled = !state.isPreparingBaseline
+                        ) { Text("Take Sample") }
                         Spacer(Modifier.width(12.dp))
                     }
                     Button(onClick = onNavigateToTrends) { Text("Weekly Trends") }

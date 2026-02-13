@@ -13,23 +13,22 @@ import java.util.*
 
 data class BreathSampleData(
     val timestamp: Long,
-    val coPpm: Double?,
+    val coRaw: Double?,
     val temperatureC: Double?,
+    val humidityPercent: Double?,
+    val deviceSerial: String?,
     val sessionId: String
 )
 
 class CsvExportUtil(private val context: Context) {
-    
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
-    
+
     suspend fun exportToCsv(
         data: List<BreathSampleData>,
-        sessionId: String
+        deviceSerial: String?
     ): Result<Pair<String, Uri>> = withContext(Dispatchers.IO) {
         try {
-            val fileName = "breath_sample_${sessionId}_${System.currentTimeMillis()}.csv"
+            val serialPrefix = sanitizedSerialPrefix(deviceSerial)
+            val fileName = "${serialPrefix}_BreathSample.csv"
             
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -41,7 +40,7 @@ class CsvExportUtil(private val context: Context) {
                 ?: return@withContext Result.failure(Exception("Failed to create file"))
             
             context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                writeCsvData(outputStream, data)
+                writeCsvData(outputStream, data, deviceSerial)
             }
             
             Result.success(fileName to uri)
@@ -50,22 +49,25 @@ class CsvExportUtil(private val context: Context) {
         }
     }
     
-    private fun writeCsvData(outputStream: OutputStream, data: List<BreathSampleData>) {
+    private fun writeCsvData(outputStream: OutputStream, data: List<BreathSampleData>, deviceSerial: String?) {
         val writer = outputStream.bufferedWriter()
-        
-        // Write CSV header
-        writer.write("timestamp_iso8601,co_ppm,temperature_c,session_id\n")
-        
-        // Write data rows
-        data.forEach { sample ->
-            val timestamp = dateFormat.format(Date(sample.timestamp))
-            val coPpm = sample.coPpm?.let { String.format(Locale.US, "%.2f", it) } ?: ""
-            val temperatureC = sample.temperatureC?.let { String.format(Locale.US, "%.2f", it) } ?: ""
-            
-            writer.write("$timestamp,$coPpm,$temperatureC,${sample.sessionId}\n")
+
+        writer.write("DeviceSerial,${deviceSerial ?: ""}\n")
+        writer.write("Index,Temperature,Humidity,CO\n")
+
+        data.forEachIndexed { index, sample ->
+            val temperatureC = sample.temperatureC?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
+            val humidity = sample.humidityPercent?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
+            val coRaw = sample.coRaw?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
+            writer.write("${index + 1},$temperatureC,$humidity,$coRaw\n")
         }
-        
+
         writer.flush()
+    }
+
+    private fun sanitizedSerialPrefix(serial: String?): String {
+        val cleaned = serial?.filter { it.isLetterOrDigit() }?.uppercase().orEmpty()
+        return if (cleaned.length >= 8) cleaned.take(8) else "BreathSample"
     }
     
     fun generateSessionId(): String {

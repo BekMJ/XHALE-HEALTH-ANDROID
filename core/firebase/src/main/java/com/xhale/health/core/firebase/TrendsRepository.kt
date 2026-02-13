@@ -49,13 +49,11 @@ class TrendsRepository @Inject constructor(
         sessions.forEach { s ->
             // Only consider sessions on/after startDay based on startedAt
             if (s.startedAt >= startIso) {
-                s.dataPoints.forEach { dp ->
-                    val ts = parseIso(dp.timestamp) ?: return@forEach
-                    if (!ts.before(startDay) && !ts.after(endDay)) {
-                        val key = dayFmt.format(ts)
-                        val ppm = dp.coPpm
-                        if (ppm != null && ppm >= 0) ppmByDay[key]?.add(ppm)
-                    }
+                val ts = parseIso(s.startedAt) ?: return@forEach
+                if (!ts.before(startDay) && !ts.after(endDay)) {
+                    val key = dayFmt.format(ts)
+                    val ppm = s.estimatedPpm ?: medianOrNull(s.dataPoints.mapNotNull { it.coPpm })
+                    if (ppm != null && ppm >= 0) ppmByDay[key]?.add(ppm)
                 }
             }
         }
@@ -86,6 +84,11 @@ class TrendsRepository @Inject constructor(
         val sorted = values.sorted()
         val mid = sorted.size / 2
         return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2.0 else sorted[mid]
+    }
+
+    private fun medianOrNull(values: List<Double>): Double? {
+        if (values.isEmpty()) return null
+        return median(values)
     }
 
     private fun computeStreakFromEnd(daily: List<DailyMedian>, threshold: Double): Int {

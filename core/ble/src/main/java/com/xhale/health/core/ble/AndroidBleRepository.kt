@@ -54,6 +54,8 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     private val maxNotifyRecoveryAttempts = 2
     private var warmupJob: Job? = null
     private var baselineCaptureJob: Job? = null
+    private var sensorPollingJob: Job? = null
+    @Volatile private var sensorStreamingStarted = false
     @Volatile private var servicesDiscovered = false
     @Volatile private var discoveryAttempts = 0
 
@@ -166,13 +168,14 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         connected = device
         warmupJob?.cancel()
         baselineCaptureJob?.cancel()
+        sensorPollingJob?.cancel()
+        sensorStreamingStarted = false
         _baselinePreparation.value = BaselinePreparationState()
         _liveData.value = LiveSensorData(
             coPpm = null,
             temperatureC = null,
             batteryPercent = null,
             serialNumber = null,
-            humidityPercent = null,
             firmwareRev = null,
             coRaw = null
         )
@@ -188,6 +191,8 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         notifyRecoveryAttempts.clear()
         warmupJob?.cancel()
         baselineCaptureJob?.cancel()
+        sensorPollingJob?.cancel()
+        sensorStreamingStarted = false
         _baselinePreparation.value = BaselinePreparationState()
         _connectionState.value = ConnectionState.DISCONNECTED
         _connectedDevice.value = null
@@ -196,7 +201,6 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             temperatureC = null,
             batteryPercent = null,
             serialNumber = null,
-            humidityPercent = null,
             firmwareRev = null,
             coRaw = null
         )
@@ -238,6 +242,8 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
                 warmupJob?.cancel()
                 baselineCaptureJob?.cancel()
+                sensorPollingJob?.cancel()
+                sensorStreamingStarted = false
                 _baselinePreparation.value = BaselinePreparationState()
                 _connectionState.value = ConnectionState.DISCONNECTED
                 _connectedDevice.value = null
@@ -265,7 +271,7 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 return
             }
             servicesDiscovered = true
-            // Enable BAS on discovery; CO/temp/humidity are enabled after warmup.
+            // Enable BAS first, then start sensor streaming immediately.
             notifyRecoveryAttempts.clear()
             notificationQueue.clear()
             enqueueNotifyIfPresent(gatt, BleUuids.BATTERY_LEVEL_CHAR)
@@ -283,6 +289,8 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 delay(10_000)
                 readCharacteristicAnywhere(gatt, BleUuids.BATTERY_LEVEL_CHAR)
             }
+            // Start CO/temp notifications as soon as connection is ready.
+            startSensorStreaming()
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
@@ -397,17 +405,12 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 val tempC = raw / 100.0
                 lastUpdateMs[ch.uuid] = System.currentTimeMillis()
                 notifyRecoveryAttempts[ch.uuid] = 0
-                _liveData.update { it.copy(temperatureC = tempC) }
-            }
-            BleUuids.HUMIDITY_CHAR -> {
-                // uint16 LE centi-%RH
-                val data = ch.getValue() ?: return
-                val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-                val raw = if (bb.remaining() >= 2) bb.short.toInt() and 0xFFFF else return
-                val humidity = raw / 100.0
-                lastUpdateMs[ch.uuid] = System.currentTimeMillis()
-                notifyRecoveryAttempts[ch.uuid] = 0
-                _liveData.update { it.copy(humidityPercent = humidity) }
+                _liveData.update {
+                    it.copy(
+                        temperatureC = tempC,
+                        lastTemperatureUpdateMs = System.currentTimeMillis()
+                    )
+                }
             }
             BleUuids.CO_CHAR -> {
                 // uint16 BE raw ADC; keep raw and mirrored display value.
@@ -451,7 +454,6 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                     isWarmupComplete = false,
                     baselineRawValue = _baselinePreparation.value.baselineRawValue,
                     baselineTemperatureC = _baselinePreparation.value.baselineTemperatureC,
-                    baselineHumidityPercent = _baselinePreparation.value.baselineHumidityPercent,
                     rawBatteryAdc = _baselinePreparation.value.rawBatteryAdc,
                     batteryVoltage = _baselinePreparation.value.batteryVoltage,
                     batteryCapacityMah = _baselinePreparation.value.batteryCapacityMah,
@@ -467,9 +469,8 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 )
             }
 
-            // Mirrors iOS behavior where internal sampling starts after warmup.
+            // Keep warmup lifecycle for baseline timing.
             writeCommandStartSampling()
-            startSensorStreaming()
 
             baselineCaptureJob = launch {
                 delay(baselineCaptureDelaySeconds * 1_000L)
@@ -481,7 +482,6 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     private fun captureWarmupBaseline() {
         val raw = _liveData.value.coRaw ?: _liveData.value.coPpm ?: return
         val temp = _liveData.value.temperatureC
-        val humidity = _liveData.value.humidityPercent
         val voltage = (raw + warmupVoltageOffset) / warmupVoltageScale
         val percent = estimateCr2032SocPercent(voltage)
         val capacityMah = 220.0 * (percent / 100.0)
@@ -489,7 +489,6 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             it.copy(
                 baselineRawValue = raw,
                 baselineTemperatureC = temp,
-                baselineHumidityPercent = humidity,
                 rawBatteryAdc = raw,
                 batteryVoltage = voltage,
                 batteryCapacityMah = capacityMah,
@@ -500,18 +499,38 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
 
     private fun startSensorStreaming() {
         val activeGatt = gatt ?: return
-        notificationQueue.clear()
-        enqueueNotifyIfPresent(activeGatt, BleUuids.CO_CHAR)
-        enqueueNotifyIfPresent(activeGatt, BleUuids.TEMPERATURE_CHAR)
-        enqueueNotifyIfPresent(activeGatt, BleUuids.HUMIDITY_CHAR)
-        Log.d(TAG, "Warmup complete. Enabling sensor notifications for ${notificationQueue.size} chars…")
+        if (!servicesDiscovered) {
+            Log.d(TAG, "Services not discovered yet; deferring sensor stream start")
+            return
+        }
+
+        if (!sensorStreamingStarted) {
+            sensorStreamingStarted = true
+            notificationQueue.clear()
+            enqueueNotifyIfPresent(activeGatt, BleUuids.CO_CHAR)
+            enqueueNotifyIfPresent(activeGatt, BleUuids.TEMPERATURE_CHAR)
+            Log.d(TAG, "Enabling sensor notifications for ${notificationQueue.size} chars…")
+            scope.launch {
+                delay(200)
+                processNextNotification(activeGatt)
+            }
+        }
+
+        // Prime initial values.
         scope.launch {
-            delay(200)
-            processNextNotification(activeGatt)
             delay(200)
             readCharacteristicAnywhere(activeGatt, BleUuids.CO_CHAR)
             readCharacteristicAnywhere(activeGatt, BleUuids.TEMPERATURE_CHAR)
-            readCharacteristicAnywhere(activeGatt, BleUuids.HUMIDITY_CHAR)
+        }
+
+        // iOS parity: keep polling temperature as a safety fallback.
+        sensorPollingJob?.cancel()
+        sensorPollingJob = scope.launch {
+            while (_connectionState.value == ConnectionState.CONNECTED) {
+                val currentGatt = gatt ?: break
+                readCharacteristicAnywhere(currentGatt, BleUuids.TEMPERATURE_CHAR)
+                delay(1_000)
+            }
         }
     }
 

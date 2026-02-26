@@ -4,18 +4,10 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.sqrt
 
-data class Baselines(
-    val rBase: Double,    // baseline CO raw
-    val tBase: Double,    // baseline temperature °C
-    val hBase: Double,    // baseline humidity %RH
-    val vBase: Double     // baseline voltage V
-)
-
 data class WindowPoint(
     val timestampMs: Long,
     val rRaw: Double,     // CO raw
     val tC: Double,       // temperature °C
-    val hPct: Double,     // humidity %RH
     val v: Double         // voltage V
 )
 
@@ -72,7 +64,6 @@ class AnalyzeBreathUseCase(
     private val coeffs: AnalyzeCoefficients = AnalyzeCoefficients()
 ) {
     companion object {
-        private const val BASELINE_MS = 7_000L
         private const val INITIAL_TEMP_BASELINE_MAX_POINTS = 10
         private const val GAS_WARMUP_SEC = 20.0
         private const val GAS_BASELINE_TAIL_SEC = 5.0
@@ -108,17 +99,6 @@ class AnalyzeBreathUseCase(
         60 to LegacyGasCoefficients(0.370518, -0.937583)
     )
 
-    fun deriveBaselines(window: List<WindowPoint>, baselineMs: Long = 7_000L): Baselines {
-        require(window.isNotEmpty()) { "window must not be empty" }
-        val start = window.first().timestampMs
-        val basePoints = window.filter { it.timestampMs - start <= baselineMs }.ifEmpty { window }
-        val rBase = basePoints.map { it.rRaw }.average()
-        val tBase = basePoints.map { it.tC }.average()
-        val hBase = basePoints.map { it.hPct }.average()
-        val vBase = basePoints.map { it.v }.average()
-        return Baselines(rBase = rBase, tBase = tBase, hBase = hBase, vBase = vBase)
-    }
-
     fun execute(
         window: List<WindowPoint>,
         serialNumber: String?,
@@ -127,8 +107,6 @@ class AnalyzeBreathUseCase(
     ): BreathAnalysis {
         require(window.isNotEmpty()) { "window must not be empty" }
         val sorted = window.sortedBy { it.timestampMs }
-        val baselines = deriveBaselines(sorted, BASELINE_MS)
-
         val durationSec = (((sorted.last().timestampMs - sorted.first().timestampMs).coerceAtLeast(0)) / 1000.0).toInt()
         val initialTempBaseline = sorted
             .take(INITIAL_TEMP_BASELINE_MAX_POINTS)
@@ -146,15 +124,17 @@ class AnalyzeBreathUseCase(
             else -> sorted.first().rRaw
         }.takeIf { it.isFinite() } ?: sorted.first().rRaw
 
+        val firstPoint = sorted.first()
+
         val tBasePre = when {
             preBreath.size >= 5 -> preBreath.map { it.tC }.average()
-            else -> initialTempBaseline
-        }.takeIf { it.isFinite() } ?: sorted.first().tC
+            else -> firstPoint.tC
+        }.takeIf { it.isFinite() } ?: firstPoint.tC
 
         val vBasePre = when {
             preBreath.size >= 3 -> preBreath.map { it.v }.average()
-            else -> baselines.vBase
-        }.takeIf { it.isFinite() } ?: sorted.first().v
+            else -> firstPoint.v
+        }.takeIf { it.isFinite() } ?: firstPoint.v
 
         val peakCandidates = sorted.drop(breathStartIndex).ifEmpty { sorted }
         val peak = peakCandidates.maxBy { it.rRaw }

@@ -20,35 +20,62 @@ import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.xhale.health.core.ble.ConnectionState
 import com.xhale.health.core.ui.BatteryEstimator
+import kotlinx.coroutines.delay
 import kotlin.math.max
+
+private const val TEMP_STALE_TIMEOUT_MS = 8_000L
 
 @Composable
 fun BreathRoute(viewModel: BreathViewModel) {
     val state by viewModel.state.collectAsState()
     BreathScreen(
-        state = state, 
-        onStart = { viewModel.startSampling(it) }, 
+        state = state,
+        onStart = { viewModel.startSampling(it) },
         onStop = viewModel::stopSampling,
         onExport = viewModel::exportToCsv,
-        onClearResult = viewModel::clearExportResult
+        onClearResult = viewModel::clearExportResult,
+        onDismissSensorDamaged = viewModel::dismissSensorDamagedDialog
     )
 }
 
 @Composable
 fun BreathScreen(
-    state: BreathUiState, 
-    onStart: (Int) -> Unit, 
+    state: BreathUiState,
+    onStart: (Int) -> Unit,
     onStop: () -> Unit,
     onExport: () -> Unit,
-    onClearResult: () -> Unit
+    onClearResult: () -> Unit,
+    onDismissSensorDamaged: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    var duration by remember { mutableStateOf(15) }
+    var duration by remember { mutableStateOf(20) }
     val scrollState = rememberScrollState()
     val isConnected =
         state.connectionState == ConnectionState.CONNECTED && state.connectedDeviceId != null
     val warmupBlocked = state.isPreparingBaseline
+    val nowMs by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            delay(1_000)
+            value = System.currentTimeMillis()
+        }
+    }
+    val tempAgeMs = state.lastTemperatureUpdateMs?.let { (nowMs - it).coerceAtLeast(0L) }
+    val showNoTempWarning =
+        isConnected &&
+            !warmupBlocked &&
+            (state.lastTemperatureUpdateMs == null ||
+                (tempAgeMs ?: Long.MAX_VALUE) > TEMP_STALE_TIMEOUT_MS)
 
+    if (state.showSensorDamagedDialog) {
+        AlertDialog(
+            onDismissRequest = onDismissSensorDamaged,
+            title = { Text("Sensor issue") },
+            text = { Text("Sensor damaged, please contact us to resolve sensor issue.") },
+            confirmButton = {
+                TextButton(onClick = onDismissSensorDamaged) { Text("OK") }
+            }
+        )
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -57,6 +84,32 @@ fun BreathScreen(
     ) {
         Text("Breath Sampling", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(8.dp))
+        
+        // Network connectivity warning
+        if (!state.isNetworkConnected) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "⚠️ No Internet Connection",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Please connect to WiFi or mobile data to start sampling.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        
         Text(
             text = if (isConnected) "Device connected" else "Device not connected",
             color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
@@ -75,6 +128,20 @@ fun BreathScreen(
                 color = MaterialTheme.colorScheme.secondary
             )
         }
+        if (showNoTempWarning) {
+            Spacer(Modifier.height(8.dp))
+            val warning = if (state.lastTemperatureUpdateMs == null) {
+                "No temp data yet. Keep the device connected and wait for sensor updates."
+            } else {
+                val seconds = ((tempAgeMs ?: 0L) / 1_000L).coerceAtLeast(1L)
+                "Temp has not updated for ${seconds}s. Keep the device connected."
+            }
+            Text(
+                text = warning,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Duration (s):")
@@ -87,15 +154,18 @@ fun BreathScreen(
             Text("Remaining: ${state.remainingSec}s")
             Spacer(Modifier.width(16.dp))
             if (!state.isSampling) {
-                Button(onClick = { onStart(duration) }, enabled = isConnected && !warmupBlocked) { Text("Start") }
+                Button(
+                    onClick = { onStart(duration) }, 
+                    enabled = isConnected && !warmupBlocked && state.isNetworkConnected
+                ) { Text("Start") }
             } else {
                 Button(onClick = onStop) { Text("Stop") }
             }
         }
         Spacer(Modifier.height(12.dp))
         Text("CO raw: ${state.coRaw?.let { String.format("%.2f", it) } ?: "--"}")
+        Text("Predicted PPM: ${state.predictedPpm?.let { String.format("%.2f", it) } ?: "--"}")
         Text("Temp: ${state.temperatureC?.let { String.format("%.2f", it) } ?: "--"} °C")
-        Text("Humidity: ${state.humidityPercent?.let { String.format("%.2f", it) } ?: "--"} %")
         val est = BatteryEstimator.estimate(state.batteryPercent)
         Text("Battery: ${state.batteryPercent?.toString() ?: "--"}%${est?.let { ", ~" + String.format("%.0f", it.hoursRemaining) + "h" } ?: ""}")
         

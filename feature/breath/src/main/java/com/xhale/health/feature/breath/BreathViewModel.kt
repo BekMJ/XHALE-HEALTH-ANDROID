@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xhale.health.core.ble.BleRepository
 import com.xhale.health.core.ble.ConnectionState
+import com.xhale.health.core.ui.NetworkRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import com.xhale.health.core.firebase.FirestoreRepository
 import com.xhale.health.core.firebase.DeviceCalibration
@@ -22,7 +23,6 @@ data class BreathSamplePoint(
     val timestampMs: Long,
     val coRaw: Double?,
     val temperatureC: Double?,
-    val humidityPercent: Double?,
     val voltageV: Double?,
     val batteryPercent: Int?
 )
@@ -37,15 +37,18 @@ data class BreathUiState(
     val isSampling: Boolean = false,
     val coRaw: Double? = null,
     val temperatureC: Double? = null,
-    val humidityPercent: Double? = null,
     val batteryPercent: Int? = null,
+    val lastTemperatureUpdateMs: Long? = null,
     val serialNumber: String? = null,
     val connectedDeviceId: String? = null,
     val points: List<BreathSamplePoint> = emptyList(),
     val sessionId: String = "",
+    val predictedPpm: Double? = null,
     val isExporting: Boolean = false,
     val exportResult: String? = null,
     val lastExportUri: android.net.Uri? = null,
+    val isNetworkConnected: Boolean = false,
+    val showSensorDamagedDialog: Boolean = false
 )
 
 @HiltViewModel
@@ -53,7 +56,8 @@ class BreathViewModel @Inject constructor(
     private val ble: BleRepository,
     private val csvExportUtil: CsvExportUtil,
     private val analyzeBreath: AnalyzeBreathUseCase,
-    private val firestore: FirestoreRepository
+    private val firestore: FirestoreRepository,
+    private val network: NetworkRepository
 ) : ViewModel() {
     private val _state = MutableStateFlow(BreathUiState())
     val state: StateFlow<BreathUiState> = _state
@@ -67,6 +71,22 @@ class BreathViewModel @Inject constructor(
         observeBleConnectionState()
         observeBaselinePreparation()
         observeBleLiveData()
+        observeNetworkConnectivity()
+    }
+
+    private fun observeNetworkConnectivity() {
+        viewModelScope.launch {
+            network.isConnected.collectLatest { connected ->
+                _state.update { it.copy(isNetworkConnected = connected) }
+                // Stop sampling if network disconnects during sampling
+                if (!connected && _state.value.isSampling) {
+                    stopSampling(
+                        shouldAnalyze = false,
+                        reason = "Internet connection lost. Please reconnect to WiFi or mobile data to continue."
+                    )
+                }
+            }
+        }
     }
 
     private fun observeBleDevice() {
@@ -123,7 +143,6 @@ class BreathViewModel @Inject constructor(
                             timestampMs = now,
                             coRaw = coRaw,
                             temperatureC = live.temperatureC,
-                            humidityPercent = live.humidityPercent,
                             voltageV = voltage,
                             batteryPercent = live.batteryPercent ?: s.batteryPercent
                         )
@@ -133,8 +152,8 @@ class BreathViewModel @Inject constructor(
                     s.copy(
                         coRaw = coRaw,
                         temperatureC = live.temperatureC,
-                        humidityPercent = live.humidityPercent,
                         batteryPercent = live.batteryPercent ?: s.batteryPercent,
+                        lastTemperatureUpdateMs = live.lastTemperatureUpdateMs,
                         serialNumber = live.serialNumber ?: s.serialNumber,
                         points = points
                     )
@@ -145,6 +164,12 @@ class BreathViewModel @Inject constructor(
     }
 
     fun startSampling(durationSec: Int) {
+        if (!_state.value.isNetworkConnected) {
+            _state.update {
+                it.copy(exportResult = "Internet connection required. Please connect to WiFi or mobile data.")
+            }
+            return
+        }
         if (_state.value.connectionState != ConnectionState.CONNECTED || _state.value.connectedDeviceId == null) {
             _state.update {
                 it.copy(exportResult = "Connect to your XHale device first (Home screen).")
@@ -165,9 +190,11 @@ class BreathViewModel @Inject constructor(
                 remainingSec = durationSec,
                 points = emptyList(),
                 sessionId = sessionId,
+                predictedPpm = null,
                 exportResult = null,
-                lastExportUri = null
-            ) 
+                lastExportUri = null,
+                showSensorDamagedDialog = false
+            )
         }
         tickerJob?.cancel()
         tickerJob = viewModelScope.launch {
@@ -206,11 +233,18 @@ class BreathViewModel @Inject constructor(
                         timestampMs = point.timestampMs,
                         rRaw = raw,
                         tC = temp,
-                        hPct = point.humidityPercent ?: 0.0,
                         v = point.voltageV ?: estimateVoltageFromRaw(raw)
                     )
                 }
-                if (window.size < 5) return@launch
+                if (window.size < 5) {
+                    _state.update {
+                        it.copy(
+                            predictedPpm = null,
+                            exportResult = "Not enough temperature/CO data to estimate PPM. Keep the device connected and try again."
+                        )
+                    }
+                    return@launch
+                }
 
                 val serial = _state.value.serialNumber
                 val calibration = serial?.let { calibrationCache[normalizedSerialPrefix(it)] }?.toGasFitCoefficients()
@@ -220,13 +254,17 @@ class BreathViewModel @Inject constructor(
                     warmupBaselineRaw = _state.value.warmupBaselineRaw,
                     cloudGasFitCoefficients = calibration
                 )
+                val suspiciousLowThreshold = 200.0
+                val sensorSuspicious = result.baselineCO < suspiciousLowThreshold && result.peakCO < suspiciousLowThreshold
                 _state.update { s ->
                     s.copy(
+                        predictedPpm = result.estimatedPpm,
                         exportResult = "PPM: " + String.format("%.2f", result.estimatedPpm) +
                             ", ΔT: " + String.format("%.2f", result.temperatureRiseC) +
                             (if (result.flags.shortDuration) " (short)" else "") +
                             (if (result.flags.smallTemperatureRise) " (low ΔT)" else "") +
-                            (if (result.flags.unstableBaseline) " (unstable baseline)" else "")
+                            (if (result.flags.unstableBaseline) " (unstable baseline)" else ""),
+                        showSensorDamagedDialog = sensorSuspicious
                     )
                 }
 
@@ -234,6 +272,15 @@ class BreathViewModel @Inject constructor(
                 val serialForUpload = _state.value.serialNumber?.takeIf { it.isNotBlank() }
                 if (serialForUpload != null) {
                     val formattedStart = firestore.formatTimestamp(window.first().timestampMs)
+                    val dataPoints = points.map { sample ->
+                        BreathDataPoint(
+                            timestamp = firestore.formatTimestamp(sample.timestampMs),
+                            coRaw = sample.coRaw,
+                            temperatureC = sample.temperatureC,
+                            batteryPercent = sample.batteryPercent,
+                            coPpm = null
+                        )
+                    }
                     val session = BreathSession(
                         sessionId = _state.value.sessionId.ifEmpty { csvExportUtil.generateSessionId() },
                         deviceId = serialForUpload,
@@ -259,10 +306,17 @@ class BreathViewModel @Inject constructor(
                             firestore.formatTimestamp(window.first().timestampMs),
                             firestore.formatTimestamp(window.last().timestampMs)
                         ),
-                        dataPoints = emptyList()
+                        dataPoints = dataPoints
                     )
                     firestore.saveBreathSession(session)
                 }
+            }
+        } else if (shouldAnalyze) {
+            _state.update {
+                it.copy(
+                    predictedPpm = null,
+                    exportResult = "Not enough sample points captured to estimate PPM."
+                )
             }
         }
     }
@@ -279,7 +333,6 @@ class BreathViewModel @Inject constructor(
                     timestamp = point.timestampMs,
                     coRaw = point.coRaw,
                     temperatureC = point.temperatureC,
-                    humidityPercent = point.humidityPercent,
                     deviceSerial = currentState.serialNumber,
                     sessionId = currentState.sessionId
                 )
@@ -302,6 +355,10 @@ class BreathViewModel @Inject constructor(
     
     fun clearExportResult() {
         _state.update { it.copy(exportResult = null) }
+    }
+
+    fun dismissSensorDamagedDialog() {
+        _state.update { it.copy(showSensorDamagedDialog = false) }
     }
 
     private fun estimateVoltageFromRaw(raw: Double): Double = (raw + 4.67) / 150.30

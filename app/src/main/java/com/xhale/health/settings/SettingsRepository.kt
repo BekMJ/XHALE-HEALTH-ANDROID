@@ -16,7 +16,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     val sampleDuration: Flow<Int> = context.dataStore.data.map { prefs ->
-        prefs[KEY_SAMPLE_DURATION] ?: 15
+        prefs[KEY_SAMPLE_DURATION] ?: 20
     }
 
     suspend fun setSampleDuration(seconds: Int) {

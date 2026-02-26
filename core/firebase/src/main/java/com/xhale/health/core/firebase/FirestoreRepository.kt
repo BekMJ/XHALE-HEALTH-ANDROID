@@ -35,7 +35,6 @@ data class BreathDataPoint(
     val timestamp: String,
     val coRaw: Double?,
     val temperatureC: Double?,
-    val humidityPercent: Double?,
     val batteryPercent: Int?,
     val coPpm: Double? = null
 )
@@ -269,7 +268,6 @@ class FirestoreRepository @Inject constructor(
                 coRaw = (point["coRaw"] as? Number)?.toDouble(),
                 coPpm = (point["coPpm"] as? Number)?.toDouble(),
                 temperatureC = (point["temperatureC"] as? Number)?.toDouble(),
-                humidityPercent = (point["humidityPercent"] as? Number)?.toDouble(),
                 batteryPercent = (point["batteryPercent"] as? Number)?.toInt()
             )
         }.orEmpty()

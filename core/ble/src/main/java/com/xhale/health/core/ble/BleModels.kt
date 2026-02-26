@@ -17,7 +17,6 @@ data class BaselinePreparationState(
     val isWarmupComplete: Boolean = false,
     val baselineRawValue: Double? = null,
     val baselineTemperatureC: Double? = null,
-    val baselineHumidityPercent: Double? = null,
     val rawBatteryAdc: Double? = null,
     val batteryVoltage: Double? = null,
     val batteryCapacityMah: Double? = null,
@@ -29,9 +28,9 @@ data class LiveSensorData(
     val temperatureC: Double?,
     val batteryPercent: Int?,
     val serialNumber: String?,
-    val humidityPercent: Double? = null,
     val firmwareRev: String? = null,
-    val coRaw: Double? = null
+    val coRaw: Double? = null,
+    val lastTemperatureUpdateMs: Long? = null
 )
 
 data class GattSpec(

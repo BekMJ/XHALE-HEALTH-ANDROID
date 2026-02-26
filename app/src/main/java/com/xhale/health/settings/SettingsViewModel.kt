@@ -12,7 +12,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class SettingsState(
-    val sampleDurationSec: Int = 15,
+    val sampleDurationSec: Int = 20,
     val firmwareBatteryPercent: Int? = null,
     val calculatedBatteryPercent: Int? = null,
     val batteryVoltage: Double? = null,

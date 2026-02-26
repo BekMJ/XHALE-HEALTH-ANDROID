@@ -88,13 +88,11 @@ class FakeBleRepository : BleRepository {
             delay(baselineCaptureDelaySeconds * 1000L)
             val raw = _liveData.value.coRaw ?: _liveData.value.coPpm ?: return@launch
             val temp = _liveData.value.temperatureC
-            val humidity = _liveData.value.humidityPercent
             val voltage = estimateVoltageFromRaw(raw)
             val percent = estimateCr2032SocPercent(voltage)
             _baselinePreparation.value = _baselinePreparation.value.copy(
                 baselineRawValue = raw,
                 baselineTemperatureC = temp,
-                baselineHumidityPercent = humidity,
                 rawBatteryAdc = raw,
                 batteryVoltage = voltage,
                 calculatedBatteryPercent = percent,
@@ -109,7 +107,6 @@ class FakeBleRepository : BleRepository {
             while (_connectionState.value == ConnectionState.CONNECTED) {
                 val co = 2.0 + 1.5 * kotlin.math.sin(t)
                 val temp = 23.0 + 0.5 * kotlin.math.cos(t / 2)
-                val humidity = 45.0 + 2.0 * kotlin.math.sin(t / 3)
                 val battery = (_liveData.value.batteryPercent ?: 100).coerceAtLeast(1)
                 val drop = if (Random.nextDouble() < 0.05) 1 else 0
                 _liveData.update {
@@ -117,7 +114,7 @@ class FakeBleRepository : BleRepository {
                         coPpm = co,
                         coRaw = co,
                         temperatureC = temp,
-                        humidityPercent = humidity,
+                        lastTemperatureUpdateMs = System.currentTimeMillis(),
                         batteryPercent = battery - drop
                     )
                 }

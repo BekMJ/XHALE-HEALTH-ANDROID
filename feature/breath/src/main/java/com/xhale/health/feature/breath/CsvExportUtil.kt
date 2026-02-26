@@ -15,7 +15,6 @@ data class BreathSampleData(
     val timestamp: Long,
     val coRaw: Double?,
     val temperatureC: Double?,
-    val humidityPercent: Double?,
     val deviceSerial: String?,
     val sessionId: String
 )
@@ -53,13 +52,12 @@ class CsvExportUtil(private val context: Context) {
         val writer = outputStream.bufferedWriter()
 
         writer.write("DeviceSerial,${deviceSerial ?: ""}\n")
-        writer.write("Index,Temperature,Humidity,CO\n")
+        writer.write("Index,Temperature,CO\n")
 
         data.forEachIndexed { index, sample ->
             val temperatureC = sample.temperatureC?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
-            val humidity = sample.humidityPercent?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
             val coRaw = sample.coRaw?.let { String.format(Locale.US, "%.2f", it) } ?: "0"
-            writer.write("${index + 1},$temperatureC,$humidity,$coRaw\n")
+            writer.write("${index + 1},$temperatureC,$coRaw\n")
         }
 
         writer.flush()

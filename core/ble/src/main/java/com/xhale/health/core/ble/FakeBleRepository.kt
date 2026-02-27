@@ -109,12 +109,14 @@ class FakeBleRepository : BleRepository {
                 val temp = 23.0 + 0.5 * kotlin.math.cos(t / 2)
                 val battery = (_liveData.value.batteryPercent ?: 100).coerceAtLeast(1)
                 val drop = if (Random.nextDouble() < 0.05) 1 else 0
+                val now = System.currentTimeMillis()
                 _liveData.update {
                     it.copy(
                         coPpm = co,
                         coRaw = co,
                         temperatureC = temp,
-                        lastTemperatureUpdateMs = System.currentTimeMillis(),
+                        lastTemperatureUpdateMs = now,
+                        lastCoUpdateMs = now,
                         batteryPercent = battery - drop
                     )
                 }
@@ -156,4 +158,3 @@ class FakeBleRepository : BleRepository {
         return 0
     }
 }
-

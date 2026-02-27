@@ -1,5 +1,6 @@
 package com.xhale.health.feature.breath
 
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -7,8 +8,8 @@ import kotlin.math.sqrt
 data class WindowPoint(
     val timestampMs: Long,
     val rRaw: Double,     // CO raw
-    val tC: Double,       // temperature °C
-    val v: Double         // voltage V
+    val tC: Double,       // temperature C
+    val v: Double?        // battery voltage V
 )
 
 data class AnalyzeCoefficients(
@@ -51,26 +52,46 @@ data class BreathAnalysis(
     val temperatureRiseC: Double,
     val baselineCO: Double,
     val baselineTemperature: Double,
-    val baselineVoltage: Double,
+    val baselineVoltage: Double?,
     val peakCO: Double,
     val peakTemperature: Double,
-    val peakVoltage: Double,
+    val peakVoltage: Double?,
     val flags: BreathFlags,
     val method: String = "AnalyzeBreath_v2",
-    val calibrationPath: BreathCalibrationPath
+    val calibrationPath: BreathCalibrationPath,
+    val calibrationMode: String,
+    val calibrationSource: String,
+    val calibrationSlopeRawPerPpm: Double?,
+    val calibrationIntercept: Double?,
+    val calibrationGainRawPerPpm: Double?,
+    val calibrationDriftRawPerSec: Double?,
+    val calibrationTauSec: Double?,
+    val calibrationDeadSec: Double?,
+    val calibrationDurationBucketSec: Int?
 )
 
 class AnalyzeBreathUseCase(
     private val coeffs: AnalyzeCoefficients = AnalyzeCoefficients()
 ) {
+    private data class GasFitResult(
+        val ppm: Double,
+        val source: String,
+        val coefficients: GasFitCoefficients
+    )
+
+    private data class LegacyCalibrationResult(
+        val ppm: Double,
+        val coefficients: LegacyGasCoefficients,
+        val durationBucketSec: Int
+    )
+
     companion object {
         private const val INITIAL_TEMP_BASELINE_MAX_POINTS = 10
-        private const val GAS_WARMUP_SEC = 20.0
-        private const val GAS_BASELINE_TAIL_SEC = 5.0
         private const val GAS_FIT_WINDOW_SEC = 20.0
         private const val GAS_DERIVATIVE_THRESHOLD = 0.1
         private const val GAS_MIN_DELTA_RAW = 1.0
-        private const val PRE_BREATH_STDDEV_THRESHOLD_RAW = 12.0
+        private const val PRE_BREATH_STDDEV_MIN_ABS_RAW = 5.0
+        private const val PRE_BREATH_STDDEV_REL = 0.02
     }
 
     private val globalGasFit = GasFitCoefficients(
@@ -103,80 +124,116 @@ class AnalyzeBreathUseCase(
         window: List<WindowPoint>,
         serialNumber: String?,
         warmupBaselineRaw: Double?,
-        cloudGasFitCoefficients: GasFitCoefficients? = null
+        cloudGasFitCoefficients: GasFitCoefficients? = null,
+        sampleDurationSec: Int? = null
     ): BreathAnalysis {
         require(window.isNotEmpty()) { "window must not be empty" }
+
         val sorted = window.sortedBy { it.timestampMs }
-        val durationSec = (((sorted.last().timestampMs - sorted.first().timestampMs).coerceAtLeast(0)) / 1000.0).toInt()
+        val firstPoint = sorted.first()
+
         val initialTempBaseline = sorted
             .take(INITIAL_TEMP_BASELINE_MAX_POINTS)
-            .ifEmpty { sorted }
             .map { it.tC }
             .average()
 
         val breathStartTempThreshold = initialTempBaseline + coeffs.breathStartTempRiseC
-        val breathStartIndex = sorted.indexOfFirst { it.tC >= breathStartTempThreshold }.let { if (it >= 0) it else 0 }
+        val breathStartIndex = sorted.indexOfFirst { it.tC >= breathStartTempThreshold }
+            .let { if (it >= 0) it else 0 }
+        val breathStartTimeMs = sorted[breathStartIndex].timestampMs
         val preBreath = if (breathStartIndex > 0) sorted.subList(0, breathStartIndex) else emptyList()
 
         val rBasePre = when {
             preBreath.size >= 5 -> trimmedMean(preBreath.map { it.rRaw })
+            preBreath.size >= 2 -> preBreath.take(2).map { it.rRaw }.average()
             warmupBaselineRaw != null -> warmupBaselineRaw
-            else -> sorted.first().rRaw
-        }.takeIf { it.isFinite() } ?: sorted.first().rRaw
-
-        val firstPoint = sorted.first()
+            sorted.size >= 2 -> sorted.take(2).map { it.rRaw }.average()
+            else -> firstPoint.rRaw
+        }.takeIf { it.isFinite() } ?: firstPoint.rRaw
 
         val tBasePre = when {
             preBreath.size >= 5 -> preBreath.map { it.tC }.average()
-            else -> firstPoint.tC
+            else -> initialTempBaseline
         }.takeIf { it.isFinite() } ?: firstPoint.tC
 
-        val vBasePre = when {
-            preBreath.size >= 3 -> preBreath.map { it.v }.average()
-            else -> firstPoint.v
-        }.takeIf { it.isFinite() } ?: firstPoint.v
+        // iOS parity: treat battery voltage as effectively constant over one breath.
+        val vBasePre = sorted.firstNotNullOfOrNull { sample ->
+            sample.v?.takeIf { it.isFinite() }
+        }
 
         val peakCandidates = sorted.drop(breathStartIndex).ifEmpty { sorted }
         val peak = peakCandidates.maxBy { it.rRaw }
         val rPeak = peak.rRaw
         val tPeak = peak.tC
-        val vPeak = peak.v
+        val vPeak = vBasePre
 
-        // Compensation
-        val deltaR = rPeak - rBasePre
         val deltaT = tPeak - tBasePre
-        val deltaV = vPeak - vBasePre
-        val deltaRComp = deltaR - coeffs.aT_raw_per_C * deltaT - coeffs.aV_raw_per_V * deltaV
+        val deltaV = 0.0
+        val deltaRComp = (rPeak - rBasePre) - coeffs.aT_raw_per_C * deltaT - coeffs.aV_raw_per_V * deltaV
+
+        val breathDurationSec = ((sorted.last().timestampMs - breathStartTimeMs).coerceAtLeast(0L) / 1000L).toInt()
 
         val calibrationPath: BreathCalibrationPath
+        var calibrationMode: String
+        var calibrationSource: String
+        var calibrationSlopeRawPerPpm: Double? = null
+        var calibrationIntercept: Double? = null
+        var calibrationGainRawPerPpm: Double? = null
+        var calibrationDriftRawPerSec: Double? = null
+        var calibrationTauSec: Double? = null
+        var calibrationDeadSec: Double? = null
+        var calibrationDurationBucketSec: Int? = null
+
         val ppm: Double = if (deltaT > coeffs.humanPathTempRiseThresholdC) {
             calibrationPath = BreathCalibrationPath.HUMAN_BREATH
+            calibrationMode = "human_breath"
+            calibrationSource = "human"
+            calibrationSlopeRawPerPpm = coeffs.humanSlope_raw_per_ppm
+            calibrationIntercept = coeffs.humanIntercept_raw
             max(0.0, (deltaRComp - coeffs.humanIntercept_raw) / coeffs.humanSlope_raw_per_ppm)
         } else {
             val serialPrefix = normalizedSerialPrefix(serialNumber)
-            val fitPpm = computeGasFitPpm(sorted, serialPrefix, cloudGasFitCoefficients)
-            if (fitPpm != null) {
+            val fit = computeGasFitResult(sorted, serialPrefix, cloudGasFitCoefficients)
+            if (fit != null) {
                 calibrationPath = BreathCalibrationPath.GAS_FIT
-                fitPpm
+                calibrationMode = "gas_fit_20s"
+                calibrationSource = fit.source
+                calibrationGainRawPerPpm = fit.coefficients.gain_raw_per_ppm
+                calibrationDriftRawPerSec = fit.coefficients.drift_raw_per_s
+                calibrationTauSec = fit.coefficients.tauSec
+                calibrationDeadSec = fit.coefficients.deadSec
+                fit.ppm
             } else {
                 calibrationPath = BreathCalibrationPath.LEGACY_GAS_FALLBACK
-                legacyGasFallbackPpm(deltaRComp, durationSec)
+                val legacy = legacyGasFallbackPpm(deltaRComp, sampleDurationSec ?: breathDurationSec)
+                calibrationMode = "calibration_gas"
+                calibrationSource = "legacy_duration_bucket"
+                calibrationSlopeRawPerPpm = legacy.coefficients.slope
+                calibrationIntercept = legacy.coefficients.intercept
+                calibrationDurationBucketSec = legacy.durationBucketSec
+                legacy.ppm
             }
         }
 
-        val tRise = sorted.maxOf { it.tC } - tBasePre
-        val preBreathStdDev = stddev(preBreath.map { it.rRaw })
+        val preBreathRaw = preBreath.map { it.rRaw }
+        val preBreathStdDev = stddev(preBreathRaw)
+        val preBreathMean = averageOf(preBreathRaw)
+        val unstableThreshold = max(
+            PRE_BREATH_STDDEV_MIN_ABS_RAW,
+            PRE_BREATH_STDDEV_REL * max(1.0, preBreathMean)
+        )
+
         val flags = BreathFlags(
-            shortDuration = durationSec < 5,
-            smallTemperatureRise = tRise < 1.0,
-            unstableBaseline = preBreath.size >= 5 && preBreathStdDev > PRE_BREATH_STDDEV_THRESHOLD_RAW
+            shortDuration = breathDurationSec < 5,
+            smallTemperatureRise = deltaT < 1.0,
+            unstableBaseline = preBreath.size >= 5 && preBreathStdDev > unstableThreshold
         )
 
         return BreathAnalysis(
             estimatedPpm = ppm,
             deltaRComp = deltaRComp,
-            breathDurationSec = durationSec,
-            temperatureRiseC = tRise,
+            breathDurationSec = breathDurationSec,
+            temperatureRiseC = deltaT,
             baselineCO = rBasePre,
             baselineTemperature = tBasePre,
             baselineVoltage = vBasePre,
@@ -184,8 +241,22 @@ class AnalyzeBreathUseCase(
             peakTemperature = tPeak,
             peakVoltage = vPeak,
             flags = flags,
-            calibrationPath = calibrationPath
+            calibrationPath = calibrationPath,
+            calibrationMode = calibrationMode,
+            calibrationSource = calibrationSource,
+            calibrationSlopeRawPerPpm = calibrationSlopeRawPerPpm,
+            calibrationIntercept = calibrationIntercept,
+            calibrationGainRawPerPpm = calibrationGainRawPerPpm,
+            calibrationDriftRawPerSec = calibrationDriftRawPerSec,
+            calibrationTauSec = calibrationTauSec,
+            calibrationDeadSec = calibrationDeadSec,
+            calibrationDurationBucketSec = calibrationDurationBucketSec
         )
+    }
+
+    private fun averageOf(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        return values.average()
     }
 
     private fun trimmedMean(values: List<Double>): Double {
@@ -202,80 +273,152 @@ class AnalyzeBreathUseCase(
         return cleaned.take(8).takeIf { it.length == 8 }
     }
 
-    private fun computeGasFitPpm(
+    private fun computeGasFitResult(
         window: List<WindowPoint>,
         serialPrefix: String?,
         cloudGasFitCoefficients: GasFitCoefficients?
-    ): Double? {
-        val coeff = cloudGasFitCoefficients ?: perDeviceGasFit[serialPrefix] ?: globalGasFit
+    ): GasFitResult? {
+        val localCoeff = perDeviceGasFit[serialPrefix]
+        val coeff = cloudGasFitCoefficients ?: localCoeff ?: globalGasFit
+        val source = when {
+            cloudGasFitCoefficients != null -> "cloud"
+            localCoeff != null -> "local"
+            else -> "global"
+        }
         if (window.size < 6 || coeff.gain_raw_per_ppm <= 0.0 || coeff.tauSec <= 0.0) return null
 
         val t0 = window.first().timestampMs
         val timesSec = window.map { (it.timestampMs - t0) / 1000.0 }
         val co = window.map { it.rRaw }
 
-        val baselineValues = co.indices
-            .filter { idx -> timesSec[idx] in (GAS_WARMUP_SEC - GAS_BASELINE_TAIL_SEC)..GAS_WARMUP_SEC }
-            .map { co[it] }
-            .ifEmpty { listOf(co.first()) }
-        if (baselineValues.isEmpty()) return null
-        val baseline = baselineValues.average()
+        val anchor = calibrationBaselineAnchor(co, timesSec) ?: return null
+        val delta = computeDeltaValuesWithDrift(
+            coValues = co,
+            times = timesSec,
+            b0 = anchor.first,
+            t0 = anchor.second,
+            driftRawPerSec = coeff.drift_raw_per_s
+        )
 
-        val delta = co.map { it - baseline }
-        val smooth = movingAverage3(delta)
+        val startIndex = detectCalibrationStartIndex(
+            times = timesSec,
+            deltaValues = delta,
+            minDetectionTimeSec = 0.0
+        )
+        val startSec = startIndex?.let { timesSec[it] } ?: (timesSec.firstOrNull() ?: 0.0)
 
-        var startIndex = -1
-        for (i in 1 until smooth.size) {
-            if (timesSec[i] < GAS_WARMUP_SEC) continue
-            val dt = timesSec[i] - timesSec[i - 1]
-            if (dt <= 0.0) continue
-            val derivative = (smooth[i] - smooth[i - 1]) / dt
-            if (derivative >= GAS_DERIVATIVE_THRESHOLD && smooth[i] >= GAS_MIN_DELTA_RAW) {
-                startIndex = i
-                break
+        val amplitude = fitCalibrationAmplitude(
+            times = timesSec,
+            deltaValues = delta,
+            startSec = startSec,
+            tauSec = coeff.tauSec,
+            deadSec = coeff.deadSec
+        ) ?: return null
+
+        return GasFitResult(
+            ppm = max(0.0, amplitude / coeff.gain_raw_per_ppm),
+            source = source,
+            coefficients = coeff
+        )
+    }
+
+    private fun calibrationBaselineAnchor(coValues: List<Double>, times: List<Double>): Pair<Double, Double>? {
+        if (coValues.isEmpty() || coValues.size != times.size) return null
+        val seedCount = minOf(2, coValues.size)
+        if (seedCount == 0) return null
+        val b0 = coValues.take(seedCount).average()
+        val t0 = if (seedCount >= 2) (times[0] + times[1]) / 2.0 else times[0]
+        return b0 to t0
+    }
+
+    private fun computeDeltaValuesWithDrift(
+        coValues: List<Double>,
+        times: List<Double>,
+        b0: Double,
+        t0: Double,
+        driftRawPerSec: Double
+    ): List<Double> {
+        return coValues.indices.map { idx ->
+            val t = times[idx]
+            val baseline = b0 + driftRawPerSec * (t - t0)
+            coValues[idx] - baseline
+        }
+    }
+
+    private fun detectCalibrationStartIndex(
+        times: List<Double>,
+        deltaValues: List<Double>,
+        minDetectionTimeSec: Double = 0.0
+    ): Int? {
+        if (times.size != deltaValues.size || times.size <= 1) return null
+
+        val smoothed = deltaValues.toMutableList()
+        if (deltaValues.size >= 3) {
+            for (i in 1 until deltaValues.lastIndex) {
+                smoothed[i] = (deltaValues[i - 1] + deltaValues[i] + deltaValues[i + 1]) / 3.0
             }
         }
-        val startTime = if (startIndex >= 0) timesSec[startIndex] else GAS_WARMUP_SEC
 
+        for (i in 1 until times.size) {
+            if (times[i] < minDetectionTimeSec) continue
+            val dt = times[i] - times[i - 1]
+            if (dt <= 0.0) continue
+            val derivative = (smoothed[i] - smoothed[i - 1]) / dt
+            if (derivative >= GAS_DERIVATIVE_THRESHOLD && deltaValues[i] >= GAS_MIN_DELTA_RAW) {
+                return i
+            }
+        }
+        return null
+    }
+
+    private fun fitCalibrationAmplitude(
+        times: List<Double>,
+        deltaValues: List<Double>,
+        startSec: Double,
+        tauSec: Double,
+        deadSec: Double
+    ): Double? {
+        if (times.size != deltaValues.size || times.isEmpty() || tauSec <= 0.0) return null
+
+        val dead = max(0.0, deadSec)
         var numerator = 0.0
         var denominator = 0.0
-        for (i in delta.indices) {
-            val u = timesSec[i] - startTime
-            if (u < 0.0 || u > GAS_FIT_WINDOW_SEC) continue
-            val effectiveTime = max(0.0, u - coeff.deadSec)
-            val f = 1.0 - exp(-effectiveTime / coeff.tauSec)
-            val yCorrected = delta[i] - coeff.drift_raw_per_s * u
-            numerator += yCorrected * f
+
+        for (i in times.indices) {
+            val u = times[i] - startSec
+            if (u < 0.0) continue
+            if (u > GAS_FIT_WINDOW_SEC) break
+
+            val effectiveTime = max(0.0, u - dead)
+            val f = if (effectiveTime > 0.0) 1.0 - exp(-effectiveTime / tauSec) else 0.0
+
+            numerator += deltaValues[i] * f
             denominator += f * f
         }
+
         if (denominator <= 1e-9) return null
-
-        val amplitude = numerator / denominator
-        return max(0.0, amplitude / coeff.gain_raw_per_ppm)
+        return numerator / denominator
     }
 
-    private fun movingAverage3(values: List<Double>): List<Double> {
-        if (values.isEmpty()) return emptyList()
-        return values.indices.map { i ->
-            val a = values[max(0, i - 1)]
-            val b = values[i]
-            val c = values[minOf(values.lastIndex, i + 1)]
-            (a + b + c) / 3.0
-        }
-    }
-
-    private fun legacyGasFallbackPpm(deltaRComp: Double, durationSec: Int): Double {
-        val chosenDuration = legacyGasByDurationSec.keys.minByOrNull { kotlin.math.abs(it - durationSec) } ?: 30
+    private fun legacyGasFallbackPpm(deltaRComp: Double, durationSec: Int): LegacyCalibrationResult {
+        val chosenDuration = legacyGasByDurationSec.keys.minByOrNull { abs(it - durationSec) } ?: 30
         val coeff = legacyGasByDurationSec[chosenDuration] ?: LegacyGasCoefficients(0.98, -1.8)
-        if (kotlin.math.abs(coeff.slope) <= 1e-9) return max(0.0, (deltaRComp + 1.8) / 0.98)
-        return max(0.0, (deltaRComp - coeff.intercept) / coeff.slope)
+        val ppm = if (abs(coeff.slope) <= 1e-9) {
+            max(0.0, (deltaRComp + 1.8) / 0.98)
+        } else {
+            max(0.0, (deltaRComp - coeff.intercept) / coeff.slope)
+        }
+        return LegacyCalibrationResult(
+            ppm = ppm,
+            coefficients = coeff,
+            durationBucketSec = chosenDuration
+        )
     }
 
     private fun stddev(values: List<Double>): Double {
-        if (values.isEmpty()) return 0.0
+        if (values.size <= 1) return 0.0
         val avg = values.average()
-        return sqrt(values.map { (it - avg) * (it - avg) }.average())
+        val variance = values.map { (it - avg) * (it - avg) }.sum() / (values.size - 1)
+        return sqrt(variance)
     }
 }
-
-

@@ -403,12 +403,13 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() else return
                 val tempC = raw / 100.0
-                lastUpdateMs[ch.uuid] = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                lastUpdateMs[ch.uuid] = now
                 notifyRecoveryAttempts[ch.uuid] = 0
                 _liveData.update {
                     it.copy(
                         temperatureC = tempC,
-                        lastTemperatureUpdateMs = System.currentTimeMillis()
+                        lastTemperatureUpdateMs = now
                     )
                 }
             }
@@ -418,9 +419,16 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 val bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() and 0xFFFF else return
                 val rawValue = raw.toDouble()
-                lastUpdateMs[ch.uuid] = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                lastUpdateMs[ch.uuid] = now
                 notifyRecoveryAttempts[ch.uuid] = 0
-                _liveData.update { it.copy(coPpm = rawValue, coRaw = rawValue) }
+                _liveData.update {
+                    it.copy(
+                        coPpm = rawValue,
+                        coRaw = rawValue,
+                        lastCoUpdateMs = now
+                    )
+                }
             }
             BleUuids.SERIAL_NUMBER_CHAR -> {
                 val data = ch.getValue() ?: return
@@ -564,4 +572,3 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         return 0
     }
 }
-

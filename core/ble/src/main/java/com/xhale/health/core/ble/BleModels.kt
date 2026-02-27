@@ -30,7 +30,8 @@ data class LiveSensorData(
     val serialNumber: String?,
     val firmwareRev: String? = null,
     val coRaw: Double? = null,
-    val lastTemperatureUpdateMs: Long? = null
+    val lastTemperatureUpdateMs: Long? = null,
+    val lastCoUpdateMs: Long? = null
 )
 
 data class GattSpec(
@@ -41,4 +42,3 @@ data class GattSpec(
     val serialChar: UUID?,
     val commandWriteChar: UUID?
 )
-

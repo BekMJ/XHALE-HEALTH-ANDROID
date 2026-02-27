@@ -4,12 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xhale.health.core.ble.BleRepository
 import com.xhale.health.core.ble.ConnectionState
+import com.xhale.health.core.firebase.BreathDataPoint
+import com.xhale.health.core.firebase.BreathSession
+import com.xhale.health.core.firebase.DeviceCalibration
+import com.xhale.health.core.firebase.FirestoreRepository
 import com.xhale.health.core.ui.NetworkRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
-import com.xhale.health.core.firebase.FirestoreRepository
-import com.xhale.health.core.firebase.DeviceCalibration
-import com.xhale.health.core.firebase.BreathSession
-import com.xhale.health.core.firebase.BreathDataPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import javax.inject.Inject
 
 data class BreathSamplePoint(
@@ -33,6 +34,7 @@ data class BreathUiState(
     val preparationSecondsLeft: Int = 0,
     val isWarmupComplete: Boolean = false,
     val warmupBaselineRaw: Double? = null,
+    val warmupBatteryVoltage: Double? = null,
     val remainingSec: Int = 0,
     val isSampling: Boolean = false,
     val coRaw: Double? = null,
@@ -59,12 +61,22 @@ class BreathViewModel @Inject constructor(
     private val firestore: FirestoreRepository,
     private val network: NetworkRepository
 ) : ViewModel() {
+    private data class TimedSample(val timestampMs: Long, val value: Double)
+
     private val _state = MutableStateFlow(BreathUiState())
     val state: StateFlow<BreathUiState> = _state
 
     private var tickerJob: Job? = null
+    private var activeSampleDurationSec: Int? = null
+    private var activeSessionSerialForCalibration: String? = null
+    private var activeSessionCloudCalibration: GasFitCoefficients? = null
     private val calibrationCache = mutableMapOf<String, DeviceCalibration?>()
     private val calibrationFetchInFlight = mutableSetOf<String>()
+
+    private val coSamples = mutableListOf<TimedSample>()
+    private val tempSamples = mutableListOf<TimedSample>()
+    private var lastObservedCoUpdateMs: Long? = null
+    private var lastObservedTempUpdateMs: Long? = null
 
     init {
         observeBleDevice()
@@ -78,7 +90,6 @@ class BreathViewModel @Inject constructor(
         viewModelScope.launch {
             network.isConnected.collectLatest { connected ->
                 _state.update { it.copy(isNetworkConnected = connected) }
-                // Stop sampling if network disconnects during sampling
                 if (!connected && _state.value.isSampling) {
                     stopSampling(
                         shouldAnalyze = false,
@@ -102,8 +113,7 @@ class BreathViewModel @Inject constructor(
             ble.connectionState.collectLatest { connection ->
                 var shouldForceStop = false
                 _state.update { current ->
-                    shouldForceStop =
-                        current.isSampling && connection != ConnectionState.CONNECTED
+                    shouldForceStop = current.isSampling && connection != ConnectionState.CONNECTED
                     current.copy(connectionState = connection)
                 }
                 if (shouldForceStop) {
@@ -124,7 +134,8 @@ class BreathViewModel @Inject constructor(
                         isPreparingBaseline = prep.isPreparingBaseline,
                         preparationSecondsLeft = prep.preparationSecondsLeft,
                         isWarmupComplete = prep.isWarmupComplete,
-                        warmupBaselineRaw = prep.baselineRawValue
+                        warmupBaselineRaw = prep.baselineRawValue,
+                        warmupBatteryVoltage = prep.batteryVoltage
                     )
                 }
             }
@@ -134,21 +145,38 @@ class BreathViewModel @Inject constructor(
     private fun observeBleLiveData() {
         viewModelScope.launch {
             ble.liveData.collectLatest { live ->
-                val now = System.currentTimeMillis()
                 val coRaw = live.coRaw ?: live.coPpm
-                val voltage = coRaw?.let { estimateVoltageFromRaw(it) }
-                _state.update { s ->
-                    val points = if (s.isSampling) {
-                        s.points + BreathSamplePoint(
-                            timestampMs = now,
-                            coRaw = coRaw,
-                            temperatureC = live.temperatureC,
-                            voltageV = voltage,
-                            batteryPercent = live.batteryPercent ?: s.batteryPercent
-                        )
-                    } else {
-                        s.points
+                val coUpdateMs = live.lastCoUpdateMs
+                val tempUpdateMs = live.lastTemperatureUpdateMs
+                val isSampling = _state.value.isSampling
+
+                if (isSampling && tempUpdateMs != null && tempUpdateMs != lastObservedTempUpdateMs) {
+                    live.temperatureC?.let { temp ->
+                        tempSamples += TimedSample(timestampMs = tempUpdateMs, value = temp)
+                        lastObservedTempUpdateMs = tempUpdateMs
                     }
+                }
+
+                var newPoint: BreathSamplePoint? = null
+                if (isSampling && coUpdateMs != null && coUpdateMs != lastObservedCoUpdateMs) {
+                    coRaw?.let { raw ->
+                        coSamples += TimedSample(timestampMs = coUpdateMs, value = raw)
+                        lastObservedCoUpdateMs = coUpdateMs
+                        val currentState = _state.value
+                        val fixedVoltage = currentState.warmupBatteryVoltage
+                            ?: currentState.warmupBaselineRaw?.let { estimateVoltageFromRaw(it) }
+                        newPoint = BreathSamplePoint(
+                            timestampMs = coUpdateMs,
+                            coRaw = raw,
+                            temperatureC = nearestSampleValue(tempSamples, coUpdateMs) ?: live.temperatureC,
+                            voltageV = fixedVoltage,
+                            batteryPercent = live.batteryPercent ?: currentState.batteryPercent
+                        )
+                    }
+                }
+
+                _state.update { s ->
+                    val points = newPoint?.let { s.points + it } ?: s.points
                     s.copy(
                         coRaw = coRaw,
                         temperatureC = live.temperatureC,
@@ -183,7 +211,19 @@ class BreathViewModel @Inject constructor(
             return
         }
         if (_state.value.isSampling) return
+
+        coSamples.clear()
+        tempSamples.clear()
+        lastObservedCoUpdateMs = null
+        lastObservedTempUpdateMs = null
+
         val sessionId = csvExportUtil.generateSessionId()
+        val sessionSerialSnapshot = _state.value.serialNumber
+        val sessionCloudCalibrationSnapshot = sessionSerialSnapshot
+            ?.let { normalizedSerialPrefix(it) }
+            ?.takeIf { it.length == 8 }
+            ?.let { calibrationCache[it] }
+            ?.toGasFitCoefficients()
         _state.update {
             it.copy(
                 isSampling = true,
@@ -196,6 +236,9 @@ class BreathViewModel @Inject constructor(
                 showSensorDamagedDialog = false
             )
         }
+        activeSampleDurationSec = durationSec
+        activeSessionSerialForCalibration = sessionSerialSnapshot
+        activeSessionCloudCalibration = sessionCloudCalibrationSnapshot
         tickerJob?.cancel()
         tickerJob = viewModelScope.launch {
             while (_state.value.isSampling && _state.value.remainingSec > 0) {
@@ -214,7 +257,14 @@ class BreathViewModel @Inject constructor(
 
     private fun stopSampling(shouldAnalyze: Boolean, reason: String? = null) {
         if (!_state.value.isSampling) return
+
         tickerJob?.cancel()
+        val configuredSampleDurationSec = activeSampleDurationSec
+        val configuredSessionSerial = activeSessionSerialForCalibration
+        val configuredSessionCloudCalibration = activeSessionCloudCalibration
+        activeSampleDurationSec = null
+        activeSessionSerialForCalibration = null
+        activeSessionCloudCalibration = null
         _state.update {
             it.copy(
                 isSampling = false,
@@ -222,20 +272,25 @@ class BreathViewModel @Inject constructor(
             )
         }
 
-        // Perform analysis when sampling ends if we have enough points
-        val points = _state.value.points
-        if (shouldAnalyze && points.size >= 5) {
+        val pointSnapshot = _state.value.points
+        val coSnapshot = coSamples.toList()
+        val tempSnapshot = tempSamples.toList()
+
+        if (shouldAnalyze && coSnapshot.size >= 5) {
             viewModelScope.launch {
-                val window = points.mapNotNull { point ->
-                    val raw = point.coRaw ?: return@mapNotNull null
-                    val temp = point.temperatureC ?: return@mapNotNull null
+                val fixedVoltage = _state.value.warmupBatteryVoltage
+                    ?: _state.value.warmupBaselineRaw?.let { estimateVoltageFromRaw(it) }
+
+                val window = coSnapshot.mapNotNull { coSample ->
+                    val temp = nearestSampleValue(tempSnapshot, coSample.timestampMs) ?: return@mapNotNull null
                     WindowPoint(
-                        timestampMs = point.timestampMs,
-                        rRaw = raw,
+                        timestampMs = coSample.timestampMs,
+                        rRaw = coSample.value,
                         tC = temp,
-                        v = point.voltageV ?: estimateVoltageFromRaw(raw)
+                        v = fixedVoltage
                     )
                 }
+
                 if (window.size < 5) {
                     _state.update {
                         it.copy(
@@ -246,33 +301,35 @@ class BreathViewModel @Inject constructor(
                     return@launch
                 }
 
-                val serial = _state.value.serialNumber
-                val calibration = serial?.let { calibrationCache[normalizedSerialPrefix(it)] }?.toGasFitCoefficients()
                 val result = analyzeBreath.execute(
                     window = window,
-                    serialNumber = serial,
+                    serialNumber = configuredSessionSerial,
                     warmupBaselineRaw = _state.value.warmupBaselineRaw,
-                    cloudGasFitCoefficients = calibration
+                    cloudGasFitCoefficients = configuredSessionCloudCalibration,
+                    sampleDurationSec = configuredSampleDurationSec
                 )
+
                 val suspiciousLowThreshold = 200.0
-                val sensorSuspicious = result.baselineCO < suspiciousLowThreshold && result.peakCO < suspiciousLowThreshold
+                val sensorSuspicious =
+                    result.baselineCO < suspiciousLowThreshold && result.peakCO < suspiciousLowThreshold
+
                 _state.update { s ->
                     s.copy(
                         predictedPpm = result.estimatedPpm,
                         exportResult = "PPM: " + String.format("%.2f", result.estimatedPpm) +
-                            ", ΔT: " + String.format("%.2f", result.temperatureRiseC) +
+                            ", dT: " + String.format("%.2f", result.temperatureRiseC) +
                             (if (result.flags.shortDuration) " (short)" else "") +
-                            (if (result.flags.smallTemperatureRise) " (low ΔT)" else "") +
+                            (if (result.flags.smallTemperatureRise) " (low dT)" else "") +
                             (if (result.flags.unstableBaseline) " (unstable baseline)" else ""),
                         showSensorDamagedDialog = sensorSuspicious
                     )
                 }
 
-                // Save to Firestore automatically only when device serial is available.
-                val serialForUpload = _state.value.serialNumber?.takeIf { it.isNotBlank() }
+                val serialForUpload = (configuredSessionSerial ?: _state.value.serialNumber)
+                    ?.takeIf { it.isNotBlank() }
                 if (serialForUpload != null) {
                     val formattedStart = firestore.formatTimestamp(window.first().timestampMs)
-                    val dataPoints = points.map { sample ->
+                    val dataPoints = pointSnapshot.map { sample ->
                         BreathDataPoint(
                             timestamp = firestore.formatTimestamp(sample.timestampMs),
                             coRaw = sample.coRaw,
@@ -302,6 +359,16 @@ class BreathViewModel @Inject constructor(
                             "smallTemperatureRise" to result.flags.smallTemperatureRise,
                             "unstableBaseline" to result.flags.unstableBaseline
                         ),
+                        calibrationMode = result.calibrationMode,
+                        calibrationSource = result.calibrationSource,
+                        calibrationPath = result.calibrationPath.name,
+                        calibrationSlopeRawPerPpm = result.calibrationSlopeRawPerPpm,
+                        calibrationIntercept = result.calibrationIntercept,
+                        calibrationGainRawPerPpm = result.calibrationGainRawPerPpm,
+                        calibrationDriftRawPerSec = result.calibrationDriftRawPerSec,
+                        calibrationTauSec = result.calibrationTauSec,
+                        calibrationDeadSec = result.calibrationDeadSec,
+                        calibrationDurationBucketSec = result.calibrationDurationBucketSec,
                         timestamps = listOf(
                             firestore.formatTimestamp(window.first().timestampMs),
                             firestore.formatTimestamp(window.last().timestampMs)
@@ -320,13 +387,13 @@ class BreathViewModel @Inject constructor(
             }
         }
     }
-    
+
     fun exportToCsv() {
         val currentState = _state.value
         if (currentState.points.isEmpty()) return
-        
+
         _state.update { it.copy(isExporting = true) }
-        
+
         viewModelScope.launch {
             val sampleData = currentState.points.map { point ->
                 BreathSampleData(
@@ -337,10 +404,10 @@ class BreathViewModel @Inject constructor(
                     sessionId = currentState.sessionId
                 )
             }
-            
+
             val result = csvExportUtil.exportToCsv(sampleData, currentState.serialNumber)
-            
-            _state.update { 
+
+            _state.update {
                 it.copy(
                     isExporting = false,
                     exportResult = result.fold(
@@ -352,7 +419,7 @@ class BreathViewModel @Inject constructor(
             }
         }
     }
-    
+
     fun clearExportResult() {
         _state.update { it.copy(exportResult = null) }
     }
@@ -362,6 +429,21 @@ class BreathViewModel @Inject constructor(
     }
 
     private fun estimateVoltageFromRaw(raw: Double): Double = (raw + 4.67) / 150.30
+
+    private fun nearestSampleValue(samples: List<TimedSample>, targetTimestampMs: Long): Double? {
+        if (samples.isEmpty()) return null
+        var best = samples.first()
+        var bestDelta = abs(best.timestampMs - targetTimestampMs)
+        for (i in 1 until samples.size) {
+            val candidate = samples[i]
+            val delta = abs(candidate.timestampMs - targetTimestampMs)
+            if (delta < bestDelta) {
+                best = candidate
+                bestDelta = delta
+            }
+        }
+        return best.value
+    }
 
     private fun normalizedSerialPrefix(serial: String): String {
         return serial.filter { it.isLetterOrDigit() }.uppercase().take(8)
@@ -377,7 +459,9 @@ class BreathViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val result = firestore.getDeviceCalibration(prefix)
-                calibrationCache[prefix] = result.getOrNull()
+                if (result.isSuccess) {
+                    calibrationCache[prefix] = result.getOrNull()
+                }
             } finally {
                 calibrationFetchInFlight -= prefix
             }
@@ -393,4 +477,3 @@ class BreathViewModel @Inject constructor(
         )
     }
 }
-

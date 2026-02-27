@@ -27,6 +27,16 @@ data class BreathSession(
     val peakVoltage: Double? = null,
     val batteryPercent: Int? = null,
     val qualityFlags: Map<String, Boolean> = emptyMap(),
+    val calibrationMode: String? = null,
+    val calibrationSource: String? = null,
+    val calibrationPath: String? = null,
+    val calibrationSlopeRawPerPpm: Double? = null,
+    val calibrationIntercept: Double? = null,
+    val calibrationGainRawPerPpm: Double? = null,
+    val calibrationDriftRawPerSec: Double? = null,
+    val calibrationTauSec: Double? = null,
+    val calibrationDeadSec: Double? = null,
+    val calibrationDurationBucketSec: Int? = null,
     val timestamps: List<String> = emptyList(),
     val dataPoints: List<BreathDataPoint> = emptyList()
 )
@@ -96,7 +106,17 @@ class FirestoreRepository @Inject constructor(
                 "peakTemperature" to session.peakTemperature,
                 "peakVoltage" to session.peakVoltage,
                 "batteryPercent" to session.batteryPercent,
-                "flags" to flags
+                "flags" to flags,
+                "calibrationMode" to session.calibrationMode,
+                "calibrationSource" to session.calibrationSource,
+                "calibrationPath" to session.calibrationPath,
+                "calibrationSlopeRawPerPpm" to session.calibrationSlopeRawPerPpm,
+                "calibrationIntercept" to session.calibrationIntercept,
+                "calibrationGainRawPerPpm" to session.calibrationGainRawPerPpm,
+                "calibrationDriftRawPerSec" to session.calibrationDriftRawPerSec,
+                "calibrationTauSec" to session.calibrationTauSec,
+                "calibrationDeadSec" to session.calibrationDeadSec,
+                "calibrationDurationBucketSec" to session.calibrationDurationBucketSec
             )
 
             val firestore = firestoreLazy.get()
@@ -295,6 +315,16 @@ class FirestoreRepository @Inject constructor(
             peakVoltage = (data["peakVoltage"] as? Number)?.toDouble(),
             batteryPercent = (data["batteryPercent"] as? Number)?.toInt(),
             qualityFlags = quality,
+            calibrationMode = data["calibrationMode"] as? String,
+            calibrationSource = data["calibrationSource"] as? String,
+            calibrationPath = data["calibrationPath"] as? String,
+            calibrationSlopeRawPerPpm = (data["calibrationSlopeRawPerPpm"] as? Number)?.toDouble(),
+            calibrationIntercept = (data["calibrationIntercept"] as? Number)?.toDouble(),
+            calibrationGainRawPerPpm = (data["calibrationGainRawPerPpm"] as? Number)?.toDouble(),
+            calibrationDriftRawPerSec = (data["calibrationDriftRawPerSec"] as? Number)?.toDouble(),
+            calibrationTauSec = (data["calibrationTauSec"] as? Number)?.toDouble(),
+            calibrationDeadSec = (data["calibrationDeadSec"] as? Number)?.toDouble(),
+            calibrationDurationBucketSec = (data["calibrationDurationBucketSec"] as? Number)?.toInt(),
             timestamps = timestamps,
             dataPoints = dataPoints
         )

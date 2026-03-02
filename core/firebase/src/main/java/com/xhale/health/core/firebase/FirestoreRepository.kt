@@ -158,7 +158,7 @@ class FirestoreRepository @Inject constructor(
             val gain = doc.getDouble("G_raw_per_ppm")
             val tau = doc.getDouble("tau_s")
             val dead = doc.getDouble("dead_s")
-            if (drift == null || gain == null || tau == null || dead == null) {
+            if (drift == null || gain == null || tau == null || dead == null || gain <= 0.0 || tau <= 0.0) {
                 calibrationCache[normalized] = null
                 return Result.success(null)
             }

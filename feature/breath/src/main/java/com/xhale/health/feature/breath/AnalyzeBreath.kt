@@ -3,6 +3,7 @@ package com.xhale.health.feature.breath
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.round
 import kotlin.math.sqrt
 
 data class WindowPoint(
@@ -90,6 +91,8 @@ class AnalyzeBreathUseCase(
         private const val GAS_FIT_WINDOW_SEC = 20.0
         private const val GAS_DERIVATIVE_THRESHOLD = 0.1
         private const val GAS_MIN_DELTA_RAW = 1.0
+        private const val GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD = 2.0
+        private const val GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD = 8.0
         private const val PRE_BREATH_STDDEV_MIN_ABS_RAW = 5.0
         private const val PRE_BREATH_STDDEV_REL = 0.02
     }
@@ -106,7 +109,12 @@ class AnalyzeBreathUseCase(
         "D1A07CD4" to GasFitCoefficients(-0.0637795, 0.653858, 14.5, 1.4),
         "D92EC0CB" to GasFitCoefficients(-0.0401157, 0.724937, 19.5, 4.0),
         "F2E4CB88" to GasFitCoefficients(-0.0314408, 0.697511, 19.5, 3.3),
-        "F685F16F" to GasFitCoefficients(-0.0333294, 0.692745, 24.5, 5.6)
+        "F685F16F" to GasFitCoefficients(-0.0333294, 0.692745, 24.5, 5.6),
+        // New 4-device set (plateau-derived constants for 0/5/10 gas classification)
+        "36F14E25" to GasFitCoefficients(-0.0542986425339367, 0.547737556561086, 22.0, 3.0),
+        "4F2F6B63" to GasFitCoefficients(-0.05239819004524888, 0.2390769230769231, 22.0, 3.0),
+        "9E9F6459" to GasFitCoefficients(-0.05556561085972852, 0.48334841628959274, 22.0, 3.0),
+        "B73545B1" to GasFitCoefficients(-0.05837104072398195, 0.5963122171945703, 22.0, 3.0)
     )
 
     private val legacyGasByDurationSec = mapOf(
@@ -196,22 +204,26 @@ class AnalyzeBreathUseCase(
             val fit = computeGasFitResult(sorted, serialPrefix, cloudGasFitCoefficients)
             if (fit != null) {
                 calibrationPath = BreathCalibrationPath.GAS_FIT
-                calibrationMode = "gas_fit_20s"
+                calibrationMode = if (fit.source == "global") {
+                    "gas_fit_20s_discrete_0_5_10"
+                } else {
+                    "gas_fit_20s_device_discrete_0_5_10"
+                }
                 calibrationSource = fit.source
                 calibrationGainRawPerPpm = fit.coefficients.gain_raw_per_ppm
                 calibrationDriftRawPerSec = fit.coefficients.drift_raw_per_s
                 calibrationTauSec = fit.coefficients.tauSec
                 calibrationDeadSec = fit.coefficients.deadSec
-                fit.ppm
+                quantizeGasPpm(fit.ppm)
             } else {
                 calibrationPath = BreathCalibrationPath.LEGACY_GAS_FALLBACK
                 val legacy = legacyGasFallbackPpm(deltaRComp, sampleDurationSec ?: breathDurationSec)
-                calibrationMode = "calibration_gas"
+                calibrationMode = "calibration_gas_discrete_0_5_10"
                 calibrationSource = "legacy_duration_bucket"
                 calibrationSlopeRawPerPpm = legacy.coefficients.slope
                 calibrationIntercept = legacy.coefficients.intercept
                 calibrationDurationBucketSec = legacy.durationBucketSec
-                legacy.ppm
+                quantizeGasPpm(legacy.ppm)
             }
         }
 
@@ -261,10 +273,10 @@ class AnalyzeBreathUseCase(
 
     private fun trimmedMean(values: List<Double>): Double {
         if (values.isEmpty()) return Double.NaN
-        if (values.size < 5) return values.average()
         val sorted = values.sorted()
-        val trim = max(1, (sorted.size * 0.1).toInt())
-        val trimmed = sorted.subList(trim, sorted.size - trim).ifEmpty { sorted }
+        val n = sorted.size
+        val trim = ((n * 0.1).toInt()).coerceIn(0, n / 2)
+        val trimmed = sorted.subList(trim, n - trim).ifEmpty { sorted }
         return trimmed.average()
     }
 
@@ -285,7 +297,7 @@ class AnalyzeBreathUseCase(
             localCoeff != null -> "local"
             else -> "global"
         }
-        if (window.size < 6 || coeff.gain_raw_per_ppm <= 0.0 || coeff.tauSec <= 0.0) return null
+        if (coeff.gain_raw_per_ppm <= 0.0 || coeff.tauSec <= 0.0) return null
 
         val t0 = window.first().timestampMs
         val timesSec = window.map { (it.timestampMs - t0) / 1000.0 }
@@ -396,13 +408,13 @@ class AnalyzeBreathUseCase(
             denominator += f * f
         }
 
-        if (denominator <= 1e-9) return null
+        if (denominator <= 0.0) return null
         return numerator / denominator
     }
 
     private fun legacyGasFallbackPpm(deltaRComp: Double, durationSec: Int): LegacyCalibrationResult {
-        val chosenDuration = legacyGasByDurationSec.keys.minByOrNull { abs(it - durationSec) } ?: 30
-        val coeff = legacyGasByDurationSec[chosenDuration] ?: LegacyGasCoefficients(0.98, -1.8)
+        val evalKey = round(durationSec.toDouble()).toInt()
+        val coeff = legacyGasByDurationSec[evalKey] ?: LegacyGasCoefficients(0.98, -1.8)
         val ppm = if (abs(coeff.slope) <= 1e-9) {
             max(0.0, (deltaRComp + 1.8) / 0.98)
         } else {
@@ -411,7 +423,7 @@ class AnalyzeBreathUseCase(
         return LegacyCalibrationResult(
             ppm = ppm,
             coefficients = coeff,
-            durationBucketSec = chosenDuration
+            durationBucketSec = evalKey
         )
     }
 
@@ -420,5 +432,13 @@ class AnalyzeBreathUseCase(
         val avg = values.average()
         val variance = values.map { (it - avg) * (it - avg) }.sum() / (values.size - 1)
         return sqrt(variance)
+    }
+
+    private fun quantizeGasPpm(ppm: Double): Double {
+        if (!ppm.isFinite()) return 0.0
+        val clipped = max(0.0, ppm)
+        if (clipped < GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD) return 0.0
+        if (clipped < GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD) return 5.0
+        return 10.0
     }
 }

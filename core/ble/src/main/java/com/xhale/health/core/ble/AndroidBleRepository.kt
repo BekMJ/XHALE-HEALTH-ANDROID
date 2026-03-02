@@ -414,7 +414,11 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 }
             }
             BleUuids.CO_CHAR -> {
-                // uint16 BE raw ADC; keep raw and mirrored display value.
+                // Firmware v7+ CO payload: big-endian uint16 (coQ2).
+                // Keep transport value as raw for calibration logic:
+                // coQ2 = (byte0 << 8) | byte1
+                // Optional display conversion can be done elsewhere:
+                // raw14 = coQ2 / 4.0, raw10eq = coQ2 / 64.0
                 val data = ch.getValue() ?: return
                 val bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
                 val raw = if (bb.remaining() >= 2) bb.short.toInt() and 0xFFFF else return

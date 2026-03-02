@@ -31,6 +31,7 @@ import com.xhale.health.feature.breath.BreathViewModel
 import com.xhale.health.core.ui.XHTheme
 import com.xhale.health.feature.auth.AuthRoute
 import com.xhale.health.core.firebase.AuthRepository
+import com.xhale.health.core.firebase.FirestoreRepository
 import com.xhale.health.prefs.UserPrefsRepository
 import com.xhale.health.settings.SettingsScreen
 import dagger.hilt.android.AndroidEntryPoint
@@ -155,6 +156,7 @@ data class StartupUiState(val startDestination: StartDestination = StartDestinat
 class StartupViewModel @Inject constructor(
     private val prefs: UserPrefsRepository,
     private val authRepository: AuthRepository,
+    private val firestoreRepository: FirestoreRepository,
     @Named("firebase_enabled") private val firebaseEnabled: Boolean
 ) : ViewModel() {
     val isFirebaseEnabled: Boolean
@@ -173,6 +175,15 @@ class StartupViewModel @Inject constructor(
             StartupUiState(StartDestination.Home)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StartupUiState())
+
+    init {
+        if (firebaseEnabled) {
+            viewModelScope.launch {
+                // One-time app-start prefetch to warm calibration cache.
+                firestoreRepository.prefetchDeviceCalibrations()
+            }
+        }
+    }
 
     fun onSignOut() {
         if (firebaseEnabled) {
@@ -273,4 +284,3 @@ fun DisclaimerScreen(onAccept: () -> Unit) {
         }
     }
 }
-

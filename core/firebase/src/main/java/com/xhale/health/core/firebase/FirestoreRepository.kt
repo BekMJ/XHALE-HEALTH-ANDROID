@@ -149,27 +149,31 @@ class FirestoreRepository @Inject constructor(
                 calibrationCache[normalized] = null
                 return Result.success(null)
             }
-            val enabled = doc.getBoolean("enabled") ?: true
-            if (!enabled) {
-                calibrationCache[normalized] = null
-                return Result.success(null)
-            }
-            val drift = doc.getDouble("a_drift_raw_per_s")
-            val gain = doc.getDouble("G_raw_per_ppm")
-            val tau = doc.getDouble("tau_s")
-            val dead = doc.getDouble("dead_s")
-            if (drift == null || gain == null || tau == null || dead == null || gain <= 0.0 || tau <= 0.0) {
-                calibrationCache[normalized] = null
-                return Result.success(null)
-            }
-            val calibration = DeviceCalibration(
-                driftRawPerSec = drift,
-                gainRawPerPpm = gain,
-                tauSec = tau,
-                deadSec = dead
-            )
+            val calibration = parseDeviceCalibration(doc)
             calibrationCache[normalized] = calibration
             Result.success(calibration)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun prefetchDeviceCalibrations(): Result<Int> {
+        if (!firebaseEnabled) return Result.success(0)
+        return try {
+            val snapshot = firestoreLazy.get()
+                .collection("deviceCalibrations")
+                .get()
+                .await()
+
+            var loaded = 0
+            for (doc in snapshot.documents) {
+                val normalized = doc.id.filter { it.isLetterOrDigit() }.uppercase().take(8)
+                if (normalized.length != 8) continue
+                val calibration = parseDeviceCalibration(doc)
+                calibrationCache[normalized] = calibration
+                if (calibration != null) loaded++
+            }
+            Result.success(loaded)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -269,6 +273,25 @@ class FirestoreRepository @Inject constructor(
 
     fun formatTimestamp(timestamp: Long): String {
         return dateFormat.format(Date(timestamp))
+    }
+
+    private fun parseDeviceCalibration(doc: com.google.firebase.firestore.DocumentSnapshot): DeviceCalibration? {
+        val enabled = doc.getBoolean("enabled") ?: true
+        if (!enabled) return null
+
+        val drift = doc.getDouble("a_drift_raw_per_s")
+        val gain = doc.getDouble("G_raw_per_ppm")
+        val tau = doc.getDouble("tau_s")
+        val dead = doc.getDouble("dead_s")
+        if (drift == null || gain == null || tau == null || dead == null || gain <= 0.0 || tau <= 0.0) {
+            return null
+        }
+        return DeviceCalibration(
+            driftRawPerSec = drift,
+            gainRawPerPpm = gain,
+            tauSec = tau,
+            deadSec = dead
+        )
     }
 
     private fun parseBreathSession(sessionId: String, data: Map<String, Any>?): BreathSession? {

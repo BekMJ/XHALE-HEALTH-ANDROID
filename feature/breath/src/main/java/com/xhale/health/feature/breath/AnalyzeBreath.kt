@@ -91,8 +91,10 @@ class AnalyzeBreathUseCase(
         private const val GAS_FIT_WINDOW_SEC = 20.0
         private const val GAS_DERIVATIVE_THRESHOLD = 0.1
         private const val GAS_MIN_DELTA_RAW = 1.0
-        private const val GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD = 2.0
-        private const val GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD = 8.0
+        private const val GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD = 2.5
+        private const val GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD = 7.5
+        private const val GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD = 12.5
+        private const val GAS_THRESHOLD_BORDERLINE_BAND_PPM = 0.25
         private const val PRE_BREATH_STDDEV_MIN_ABS_RAW = 5.0
         private const val PRE_BREATH_STDDEV_REL = 0.02
     }
@@ -110,11 +112,11 @@ class AnalyzeBreathUseCase(
         "D92EC0CB" to GasFitCoefficients(-0.0401157, 0.724937, 19.5, 4.0),
         "F2E4CB88" to GasFitCoefficients(-0.0314408, 0.697511, 19.5, 3.3),
         "F685F16F" to GasFitCoefficients(-0.0333294, 0.692745, 24.5, 5.6),
-        // New 4-device set (plateau-derived constants for 0/5/10 gas classification)
-        "36F14E25" to GasFitCoefficients(-0.0542986425339367, 0.547737556561086, 22.0, 3.0),
-        "4F2F6B63" to GasFitCoefficients(-0.05239819004524888, 0.2390769230769231, 22.0, 3.0),
-        "9E9F6459" to GasFitCoefficients(-0.05556561085972852, 0.48334841628959274, 22.0, 3.0),
-        "B73545B1" to GasFitCoefficients(-0.05837104072398195, 0.5963122171945703, 22.0, 3.0)
+        // New 4-device set (0/5/10/15 ppm, 120s protocol, gas-on at sample start)
+        "36F14E25" to GasFitCoefficients(-2.089954189448795, 74.80982480894498, 22.0, 3.0),
+        "4F2F6B63" to GasFitCoefficients(-2.1033249593616072, 39.7056459294788, 22.0, 3.0),
+        "9E9F6459" to GasFitCoefficients(-1.780570415250479, 59.16004336321591, 22.0, 3.0),
+        "B73545B1" to GasFitCoefficients(-1.9470696024826366, 80.7635699785618, 22.0, 3.0)
     )
 
     private val legacyGasByDurationSec = mapOf(
@@ -205,9 +207,9 @@ class AnalyzeBreathUseCase(
             if (fit != null) {
                 calibrationPath = BreathCalibrationPath.GAS_FIT
                 calibrationMode = if (fit.source == "global") {
-                    "gas_fit_20s_discrete_0_5_10"
+                    "gas_fit_20s_discrete_0_5_10_15"
                 } else {
-                    "gas_fit_20s_device_discrete_0_5_10"
+                    "gas_fit_20s_device_discrete_0_5_10_15"
                 }
                 calibrationSource = fit.source
                 calibrationGainRawPerPpm = fit.coefficients.gain_raw_per_ppm
@@ -218,7 +220,7 @@ class AnalyzeBreathUseCase(
             } else {
                 calibrationPath = BreathCalibrationPath.LEGACY_GAS_FALLBACK
                 val legacy = legacyGasFallbackPpm(deltaRComp, sampleDurationSec ?: breathDurationSec)
-                calibrationMode = "calibration_gas_discrete_0_5_10"
+                calibrationMode = "calibration_gas_discrete_0_5_10_15"
                 calibrationSource = "legacy_duration_bucket"
                 calibrationSlopeRawPerPpm = legacy.coefficients.slope
                 calibrationIntercept = legacy.coefficients.intercept
@@ -437,8 +439,16 @@ class AnalyzeBreathUseCase(
     private fun quantizeGasPpm(ppm: Double): Double {
         if (!ppm.isFinite()) return 0.0
         val clipped = max(0.0, ppm)
+        // Explicit request: 2.5 should map to 5 ppm (not 0), so keep strict '<' here.
         if (clipped < GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD) return 0.0
+        if (abs(clipped - GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD) <= GAS_THRESHOLD_BORDERLINE_BAND_PPM) {
+            return GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD
+        }
+        if (abs(clipped - GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD) <= GAS_THRESHOLD_BORDERLINE_BAND_PPM) {
+            return GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD
+        }
         if (clipped < GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD) return 5.0
-        return 10.0
+        if (clipped < GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD) return 10.0
+        return 15.0
     }
 }

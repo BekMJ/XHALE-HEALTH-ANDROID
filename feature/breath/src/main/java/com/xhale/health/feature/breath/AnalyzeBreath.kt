@@ -14,7 +14,7 @@ data class WindowPoint(
 )
 
 data class AnalyzeCoefficients(
-    val aT_raw_per_C: Double = 0.80,
+    val aT_raw_per_C: Double = 17.3,
     val aV_raw_per_V: Double = 150.3,
     val humanSlope_raw_per_ppm: Double = 3.6,
     val humanIntercept_raw: Double = 0.0,

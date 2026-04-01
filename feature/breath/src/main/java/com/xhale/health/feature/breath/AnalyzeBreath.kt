@@ -107,16 +107,24 @@ class AnalyzeBreathUseCase(
     )
 
     private val perDeviceGasFit = mapOf(
-        "6C8A4BC7" to GasFitCoefficients(-0.0227256, 0.798849, 34.25, 5.5),
-        "D1A07CD4" to GasFitCoefficients(-0.0637795, 0.653858, 14.5, 1.4),
-        "D92EC0CB" to GasFitCoefficients(-0.0401157, 0.724937, 19.5, 4.0),
-        "F2E4CB88" to GasFitCoefficients(-0.0314408, 0.697511, 19.5, 3.3),
-        "F685F16F" to GasFitCoefficients(-0.0333294, 0.692745, 24.5, 5.6),
-        // New 4-device set (0/5/10/15 ppm, 120s protocol, gas-on at sample start)
-        "36F14E25" to GasFitCoefficients(-2.089954189448795, 74.80982480894498, 22.0, 3.0),
-        "4F2F6B63" to GasFitCoefficients(-2.1033249593616072, 39.7056459294788, 22.0, 3.0),
-        "9E9F6459" to GasFitCoefficients(-1.780570415250479, 59.16004336321591, 22.0, 3.0),
-        "B73545B1" to GasFitCoefficients(-1.9470696024826366, 80.7635699785618, 22.0, 3.0)
+        "36F14E25" to GasFitCoefficients(-11.614786086534453, 41.716293614542884, 1.0, 4.4999999999999964),
+        "3BBF9785" to GasFitCoefficients(-10.471969696969502, 31.479081945883948, 1.0, 0.0),
+        "4F2F6B63" to GasFitCoefficients(-12.012171684817618, 22.527506773281576, 1.0, 0.0),
+        "6C8A4BC7" to GasFitCoefficients(-3.0050179211461976, 24.755280783644842, 1.0, 4.999999999999998),
+        "6F19F9D0" to GasFitCoefficients(-1.8432432432439438, 18.34507990192077, 1.0, 4.999999999999998),
+        "794093CF" to GasFitCoefficients(-2.756746031747078, 27.690993101572072, 1.0, 6.9999999999999964),
+        "7ED2FA3A" to GasFitCoefficients(-2.0427035330255703, 158.29719571864192, 36.0, 6.899999999999997),
+        "7FF4CB9D" to GasFitCoefficients(-10.0332133813142, 35.121022728144894, 1.0, 3.4999999999999964),
+        "9E9F6459" to GasFitCoefficients(-10.141800128122737, 62.29243020944069, 9.0, 6.9999999999999964),
+        "B73545B1" to GasFitCoefficients(-10.894644909215634, 222.95554759553872, 37.0, 6.9999999999999964),
+        "D1A07CD4" to GasFitCoefficients(-2.0127731092436667, 134.06462623156233, 37.0, 6.9999999999999964),
+        "D92EC0CB" to GasFitCoefficients(-2.0757575757569358, 21.625101885995086, 1.0, 0.0),
+        "DC3F9A7B" to GasFitCoefficients(3.5085714285715164, 32.297927359727716, 4.0, 6.9999999999999964),
+        "E0AED989" to GasFitCoefficients(-3.1222597553873244, 61.93527632478544, 22.0, 3.0),
+        "E5ACF73C" to GasFitCoefficients(-10.882020525122973, 35.64978304202127, 1.0, 0.0),
+        "F2E4CB88" to GasFitCoefficients(-2.387121212121121, 25.45262808091884, 6.0, 1.4500000000000002),
+        "F685F16F" to GasFitCoefficients(-1.98023, 63.777212, 17.75, 1.15),
+        "F7CF3358" to GasFitCoefficients(-2.887169760194338, 18.93036200071086, 1.0, 0.0)
     )
 
     private val legacyGasByDurationSec = mapOf(

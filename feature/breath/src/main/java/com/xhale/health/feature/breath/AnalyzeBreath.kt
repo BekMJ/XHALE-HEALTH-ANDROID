@@ -447,16 +447,10 @@ class AnalyzeBreathUseCase(
     private fun quantizeGasPpm(ppm: Double): Double {
         if (!ppm.isFinite()) return 0.0
         val clipped = max(0.0, ppm)
-        // Explicit request: 2.5 should map to 5 ppm (not 0), so keep strict '<' here.
-        if (clipped < GAS_DISCRETE_ZERO_TO_FIVE_PPM_THRESHOLD) return 0.0
-        if (abs(clipped - GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD) <= GAS_THRESHOLD_BORDERLINE_BAND_PPM) {
-            return GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD
-        }
-        if (abs(clipped - GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD) <= GAS_THRESHOLD_BORDERLINE_BAND_PPM) {
-            return GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD
-        }
-        if (clipped < GAS_DISCRETE_FIVE_TO_TEN_PPM_THRESHOLD) return 5.0
-        if (clipped < GAS_DISCRETE_TEN_TO_FIFTEEN_PPM_THRESHOLD) return 10.0
-        return 15.0
+        if (clipped == 0.0) return 0.0
+        if (clipped in 2.0..7.0) return 5.0
+        if (clipped in 8.0..12.0) return 10.0
+        if (clipped in 13.0..17.0) return 15.0
+        return clipped
     }
 }

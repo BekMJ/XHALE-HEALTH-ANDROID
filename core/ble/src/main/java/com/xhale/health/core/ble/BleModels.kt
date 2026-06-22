@@ -23,6 +23,13 @@ data class BaselinePreparationState(
     val calculatedBatteryPercent: Int? = null
 )
 
+data class FirmwareGasCalibration(
+    val driftRawPerSec: Double,
+    val gainRawPerPpm: Double,
+    val tauSec: Double,
+    val deadSec: Double
+)
+
 data class LiveSensorData(
     val coPpm: Double?,
     val temperatureC: Double?,
@@ -31,7 +38,8 @@ data class LiveSensorData(
     val firmwareRev: String? = null,
     val coRaw: Double? = null,
     val lastTemperatureUpdateMs: Long? = null,
-    val lastCoUpdateMs: Long? = null
+    val lastCoUpdateMs: Long? = null,
+    val firmwareCalibration: FirmwareGasCalibration? = null
 )
 
 data class GattSpec(
@@ -40,5 +48,6 @@ data class GattSpec(
     val tempChar: UUID,
     val batteryChar: UUID?,
     val serialChar: UUID?,
+    val calReadChar: UUID? = null,
     val commandWriteChar: UUID?
 )

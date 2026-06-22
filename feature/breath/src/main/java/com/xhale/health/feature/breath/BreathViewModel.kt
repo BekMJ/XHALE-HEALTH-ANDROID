@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xhale.health.core.ble.BleRepository
 import com.xhale.health.core.ble.ConnectionState
+import com.xhale.health.core.ble.FirmwareGasCalibration
 import com.xhale.health.core.firebase.BreathDataPoint
 import com.xhale.health.core.firebase.BreathSession
 import com.xhale.health.core.firebase.DeviceCalibration
@@ -69,9 +70,11 @@ class BreathViewModel @Inject constructor(
     private var tickerJob: Job? = null
     private var activeSampleDurationSec: Int? = null
     private var activeSessionSerialForCalibration: String? = null
+    private var activeSessionFirmwareCalibration: GasFitCoefficients? = null
     private var activeSessionCloudCalibration: GasFitCoefficients? = null
+    private var latestFirmwareCalibration: GasFitCoefficients? = null
     private val calibrationCache = mutableMapOf<String, DeviceCalibration?>()
-    private val calibrationFetchInFlight = mutableSetOf<String>()
+    private val calibrationFetchInFlight = mutableMapOf<String, Job>()
 
     private val coSamples = mutableListOf<TimedSample>()
     private val tempSamples = mutableListOf<TimedSample>()
@@ -121,6 +124,8 @@ class BreathViewModel @Inject constructor(
                         shouldAnalyze = false,
                         reason = "Device disconnected. Reconnect on Home before sampling."
                     )
+                } else if (connection == ConnectionState.CONNECTED) {
+                    ensureCalibrationFetched(_state.value.serialNumber)
                 }
             }
         }
@@ -145,6 +150,7 @@ class BreathViewModel @Inject constructor(
     private fun observeBleLiveData() {
         viewModelScope.launch {
             ble.liveData.collectLatest { live ->
+                latestFirmwareCalibration = live.firmwareCalibration?.toGasFitCoefficients()
                 val coRaw = live.coRaw ?: live.coPpm
                 val coUpdateMs = live.lastCoUpdateMs
                 val tempUpdateMs = live.lastTemperatureUpdateMs
@@ -175,6 +181,7 @@ class BreathViewModel @Inject constructor(
                     }
                 }
 
+                val serialForCalibration = live.serialNumber ?: _state.value.serialNumber
                 _state.update { s ->
                     val points = newPoint?.let { s.points + it } ?: s.points
                     s.copy(
@@ -186,32 +193,59 @@ class BreathViewModel @Inject constructor(
                         points = points
                     )
                 }
-                ensureCalibrationFetched(live.serialNumber)
+                ensureCalibrationFetched(serialForCalibration)
             }
         }
     }
 
     fun startSampling(durationSec: Int) {
-        if (!_state.value.isNetworkConnected) {
+        if (!validateCanStartSampling()) return
+
+        val serialPrefix = _state.value.serialNumber
+            ?.let { normalizedSerialPrefix(it) }
+            ?.takeIf { it.length == 8 }
+
+        if (serialPrefix != null && !calibrationCache.containsKey(serialPrefix)) {
+            _state.update {
+                it.copy(exportResult = "Loading calibration constants for $serialPrefix...")
+            }
+            viewModelScope.launch {
+                fetchCalibrationForPrefix(serialPrefix)
+                if (validateCanStartSampling()) {
+                    beginSampling(durationSec)
+                }
+            }
+            return
+        }
+
+        beginSampling(durationSec)
+    }
+
+    private fun validateCanStartSampling(): Boolean {
+        val current = _state.value
+        if (!current.isNetworkConnected) {
             _state.update {
                 it.copy(exportResult = "Internet connection required. Please connect to WiFi or mobile data.")
             }
-            return
+            return false
         }
-        if (_state.value.connectionState != ConnectionState.CONNECTED || _state.value.connectedDeviceId == null) {
+        if (current.connectionState != ConnectionState.CONNECTED || current.connectedDeviceId == null) {
             _state.update {
                 it.copy(exportResult = "Connect to your XHale device first (Home screen).")
             }
-            return
+            return false
         }
-        if (_state.value.isPreparingBaseline) {
+        if (current.isPreparingBaseline) {
             _state.update {
                 it.copy(exportResult = "Warmup in progress. Please wait ${it.preparationSecondsLeft}s.")
             }
-            return
+            return false
         }
-        if (_state.value.isSampling) return
+        return !current.isSampling
+    }
 
+    private fun beginSampling(durationSec: Int) {
+        if (_state.value.isSampling) return
         coSamples.clear()
         tempSamples.clear()
         lastObservedCoUpdateMs = null
@@ -219,11 +253,8 @@ class BreathViewModel @Inject constructor(
 
         val sessionId = csvExportUtil.generateSessionId()
         val sessionSerialSnapshot = _state.value.serialNumber
-        val sessionCloudCalibrationSnapshot = sessionSerialSnapshot
-            ?.let { normalizedSerialPrefix(it) }
-            ?.takeIf { it.length == 8 }
-            ?.let { calibrationCache[it] }
-            ?.toGasFitCoefficients()
+        val sessionFirmwareCalibrationSnapshot = latestFirmwareCalibration
+        val sessionCloudCalibrationSnapshot = calibrationForSerial(sessionSerialSnapshot)
         _state.update {
             it.copy(
                 isSampling = true,
@@ -238,6 +269,7 @@ class BreathViewModel @Inject constructor(
         }
         activeSampleDurationSec = durationSec
         activeSessionSerialForCalibration = sessionSerialSnapshot
+        activeSessionFirmwareCalibration = sessionFirmwareCalibrationSnapshot
         activeSessionCloudCalibration = sessionCloudCalibrationSnapshot
         tickerJob?.cancel()
         tickerJob = viewModelScope.launch {
@@ -261,9 +293,11 @@ class BreathViewModel @Inject constructor(
         tickerJob?.cancel()
         val configuredSampleDurationSec = activeSampleDurationSec
         val configuredSessionSerial = activeSessionSerialForCalibration
+        val configuredSessionFirmwareCalibration = activeSessionFirmwareCalibration
         val configuredSessionCloudCalibration = activeSessionCloudCalibration
         activeSampleDurationSec = null
         activeSessionSerialForCalibration = null
+        activeSessionFirmwareCalibration = null
         activeSessionCloudCalibration = null
         _state.update {
             it.copy(
@@ -305,6 +339,7 @@ class BreathViewModel @Inject constructor(
                     window = window,
                     serialNumber = configuredSessionSerial,
                     warmupBaselineRaw = _state.value.warmupBaselineRaw,
+                    firmwareGasFitCoefficients = configuredSessionFirmwareCalibration,
                     cloudGasFitCoefficients = configuredSessionCloudCalibration,
                     sampleDurationSec = configuredSampleDurationSec
                 )
@@ -454,21 +489,51 @@ class BreathViewModel @Inject constructor(
             ?.let { normalizedSerialPrefix(it) }
             ?.takeIf { it.length == 8 }
             ?: return
-        if (calibrationCache.containsKey(prefix) || calibrationFetchInFlight.contains(prefix)) return
-        calibrationFetchInFlight += prefix
-        viewModelScope.launch {
+        if (calibrationCache.containsKey(prefix) || calibrationFetchInFlight.containsKey(prefix)) return
+        startCalibrationFetch(prefix)
+    }
+
+    private suspend fun fetchCalibrationForPrefix(prefix: String): DeviceCalibration? {
+        if (!calibrationCache.containsKey(prefix)) {
+            startCalibrationFetch(prefix).join()
+        }
+        return calibrationCache[prefix]
+    }
+
+    private fun startCalibrationFetch(prefix: String): Job {
+        calibrationFetchInFlight[prefix]?.let { return it }
+        val job = viewModelScope.launch {
             try {
                 val result = firestore.getDeviceCalibration(prefix)
                 if (result.isSuccess) {
                     calibrationCache[prefix] = result.getOrNull()
                 }
             } finally {
-                calibrationFetchInFlight -= prefix
+                calibrationFetchInFlight.remove(prefix)
             }
         }
+        calibrationFetchInFlight[prefix] = job
+        return job
+    }
+
+    private fun calibrationForSerial(serial: String?): GasFitCoefficients? {
+        return serial
+            ?.let { normalizedSerialPrefix(it) }
+            ?.takeIf { it.length == 8 }
+            ?.let { calibrationCache[it] }
+            ?.toGasFitCoefficients()
     }
 
     private fun DeviceCalibration.toGasFitCoefficients(): GasFitCoefficients {
+        return GasFitCoefficients(
+            drift_raw_per_s = driftRawPerSec,
+            gain_raw_per_ppm = gainRawPerPpm,
+            tauSec = tauSec,
+            deadSec = deadSec
+        )
+    }
+
+    private fun FirmwareGasCalibration.toGasFitCoefficients(): GasFitCoefficients {
         return GasFitCoefficients(
             drift_raw_per_s = driftRawPerSec,
             gain_raw_per_ppm = gainRawPerPpm,

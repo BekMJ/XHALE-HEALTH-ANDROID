@@ -14,6 +14,7 @@ object BleUuids {
     val SERIAL_NUMBER_CHAR: UUID = UUID.fromString("00002A25-0000-1000-8000-00805F9B34FB")
     val FIRMWARE_REV_CHAR: UUID = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
     val BATTERY_LEVEL_CHAR: UUID = UUID.fromString("00002A19-0000-1000-8000-00805F9B34FB")
+    val CAL_READ_CHAR: UUID = UUID.fromString("D5C3C001-38F3-4EAA-A6D8-87D8A23B5F11")
 }
 
 val XHaleGattSpec = GattSpec(
@@ -22,6 +23,6 @@ val XHaleGattSpec = GattSpec(
     tempChar = BleUuids.TEMPERATURE_CHAR,
     batteryChar = BleUuids.BATTERY_LEVEL_CHAR,
     serialChar = BleUuids.SERIAL_NUMBER_CHAR,
+    calReadChar = BleUuids.CAL_READ_CHAR,
     commandWriteChar = null
 )
-

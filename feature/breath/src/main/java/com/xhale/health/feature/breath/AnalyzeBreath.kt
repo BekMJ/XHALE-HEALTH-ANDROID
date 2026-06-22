@@ -100,10 +100,10 @@ class AnalyzeBreathUseCase(
     }
 
     private val globalGasFit = GasFitCoefficients(
-        drift_raw_per_s = 0.0,
-        gain_raw_per_ppm = 0.695,
-        tauSec = 22.0,
-        deadSec = 0.0
+        drift_raw_per_s = -6.100806002899952,
+        gain_raw_per_ppm = 26.115734843177872,
+        tauSec = 1.669570638561888,
+        deadSec = 5.0
     )
 
     private val perDeviceGasFit = mapOf(
@@ -142,6 +142,7 @@ class AnalyzeBreathUseCase(
         window: List<WindowPoint>,
         serialNumber: String?,
         warmupBaselineRaw: Double?,
+        firmwareGasFitCoefficients: GasFitCoefficients? = null,
         cloudGasFitCoefficients: GasFitCoefficients? = null,
         sampleDurationSec: Int? = null
     ): BreathAnalysis {
@@ -211,7 +212,12 @@ class AnalyzeBreathUseCase(
             max(0.0, (deltaRComp - coeffs.humanIntercept_raw) / coeffs.humanSlope_raw_per_ppm)
         } else {
             val serialPrefix = normalizedSerialPrefix(serialNumber)
-            val fit = computeGasFitResult(sorted, serialPrefix, cloudGasFitCoefficients)
+            val fit = computeGasFitResult(
+                window = sorted,
+                serialPrefix = serialPrefix,
+                firmwareGasFitCoefficients = firmwareGasFitCoefficients,
+                cloudGasFitCoefficients = cloudGasFitCoefficients
+            )
             if (fit != null) {
                 calibrationPath = BreathCalibrationPath.GAS_FIT
                 calibrationMode = if (fit.source == "global") {
@@ -298,11 +304,13 @@ class AnalyzeBreathUseCase(
     private fun computeGasFitResult(
         window: List<WindowPoint>,
         serialPrefix: String?,
+        firmwareGasFitCoefficients: GasFitCoefficients?,
         cloudGasFitCoefficients: GasFitCoefficients?
     ): GasFitResult? {
         val localCoeff = perDeviceGasFit[serialPrefix]
-        val coeff = cloudGasFitCoefficients ?: localCoeff ?: globalGasFit
+        val coeff = firmwareGasFitCoefficients ?: cloudGasFitCoefficients ?: localCoeff ?: globalGasFit
         val source = when {
+            firmwareGasFitCoefficients != null -> "firmware"
             cloudGasFitCoefficients != null -> "cloud"
             localCoeff != null -> "local"
             else -> "global"

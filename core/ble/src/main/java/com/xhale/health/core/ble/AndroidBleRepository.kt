@@ -82,6 +82,12 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
     private val notifyDescriptorUuid = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     // CO: firmware sends a 16-bit big-endian integer (raw ADC).
 
+    private companion object {
+        private const val FIRMWARE_CAL_MAGIC = 0x5843414C
+        private const val FIRMWARE_CAL_VERSION = 0x01
+        private const val FIRMWARE_CAL_ENABLED_FLAG = 0x01
+    }
+
     private fun hasConnectPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= 31) {
             ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
@@ -285,6 +291,10 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
             readCharacteristicAnywhere(gatt, BleUuids.SERIAL_NUMBER_CHAR)
             readCharacteristicAnywhere(gatt, BleUuids.FIRMWARE_REV_CHAR)
             scope.launch {
+                delay(250)
+                readFirmwareCalibrationIfPresent(gatt)
+            }
+            scope.launch {
                 // Initial BAS read is delayed to avoid stale early values.
                 delay(10_000)
                 readCharacteristicAnywhere(gatt, BleUuids.BATTERY_LEVEL_CHAR)
@@ -298,6 +308,12 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         }
 
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                if (characteristic.uuid == BleUuids.CAL_READ_CHAR) {
+                    Log.w(TAG, "CAL_READ failed with GATT status=$status; continuing without firmware calibration")
+                }
+                return
+            }
             handleCharacteristic(characteristic)
         }
 
@@ -376,10 +392,23 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
         gatt.getService(serviceUuid)?.getCharacteristic(charUuid)?.let { gatt.readCharacteristic(it) }
     }
 
-    private fun readCharacteristicAnywhere(gatt: BluetoothGatt, charUuid: UUID) {
-        if (!hasConnectPermission()) return
-        val svc = findServiceUuidForCharacteristic(gatt, charUuid) ?: return
-        gatt.getService(svc)?.getCharacteristic(charUuid)?.let { gatt.readCharacteristic(it) }
+    private fun readCharacteristicAnywhere(gatt: BluetoothGatt, charUuid: UUID): Boolean {
+        if (!hasConnectPermission()) return false
+        val svc = findServiceUuidForCharacteristic(gatt, charUuid) ?: return false
+        val ch = gatt.getService(svc)?.getCharacteristic(charUuid) ?: return false
+        return gatt.readCharacteristic(ch)
+    }
+
+    private suspend fun readFirmwareCalibrationIfPresent(gatt: BluetoothGatt) {
+        if (findServiceUuidForCharacteristic(gatt, BleUuids.CAL_READ_CHAR) == null) {
+            Log.d(TAG, "CAL_READ characteristic not present; using calibration fallback chain")
+            return
+        }
+        repeat(3) { attempt ->
+            if (readCharacteristicAnywhere(gatt, BleUuids.CAL_READ_CHAR)) return
+            delay(200L * (attempt + 1))
+        }
+        Log.w(TAG, "CAL_READ characteristic present but read could not be started; continuing without firmware calibration")
     }
 
     private fun enqueueNotifyIfPresent(gatt: BluetoothGatt, charUuid: UUID) {
@@ -452,7 +481,89 @@ class AndroidBleRepository(private val context: Context) : BleRepository {
                 }
                 _liveData.update { it.copy(batteryPercent = level) }
             }
+            BleUuids.CAL_READ_CHAR -> {
+                val data = ch.getValue() ?: return
+                val calibration = parseFirmwareCalibrationRecord(data)
+                if (calibration != null) {
+                    Log.d(TAG, "Loaded firmware calibration from CAL_READ")
+                    _liveData.update { it.copy(firmwareCalibration = calibration) }
+                }
+            }
         }
+    }
+
+    private fun parseFirmwareCalibrationRecord(data: ByteArray): FirmwareGasCalibration? {
+        if (data.size != 32) {
+            Log.w(TAG, "Invalid CAL_READ length=${data.size}; expected 32 bytes")
+            return null
+        }
+        if (readUInt32LE(data, 0) != FIRMWARE_CAL_MAGIC) {
+            Log.d(TAG, "CAL_READ has no XCAL record; using calibration fallback chain")
+            return null
+        }
+        val version = data[4].toInt() and 0xFF
+        if (version != FIRMWARE_CAL_VERSION) {
+            Log.w(TAG, "Unsupported CAL_READ version=$version")
+            return null
+        }
+        val flags = data[5].toInt() and 0xFF
+        if (flags != FIRMWARE_CAL_ENABLED_FLAG) {
+            Log.d(TAG, "CAL_READ record is not enabled; flags=$flags")
+            return null
+        }
+
+        val storedCrc = readUInt16LE(data, 30)
+        val computedCrc = firmwareCalibrationCrc16(data.copyOfRange(0, 30))
+        if (storedCrc != computedCrc) {
+            Log.w(TAG, "CAL_READ CRC mismatch; stored=$storedCrc computed=$computedCrc")
+            return null
+        }
+
+        val gain = readFloat32LE(data, 12).toDouble()
+        val tau = readFloat32LE(data, 16).toDouble()
+        val dead = readFloat32LE(data, 20).toDouble()
+        val drift = readFloat32LE(data, 24).toDouble()
+        if (!drift.isFinite() || !gain.isFinite() || !tau.isFinite() || !dead.isFinite() ||
+            gain <= 0.0 || tau <= 0.0 || dead < 0.0
+        ) {
+            Log.w(TAG, "CAL_READ contains invalid gas-fit constants")
+            return null
+        }
+
+        return FirmwareGasCalibration(
+            driftRawPerSec = drift,
+            gainRawPerPpm = gain,
+            tauSec = tau,
+            deadSec = dead
+        )
+    }
+
+    private fun readUInt16LE(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun readUInt32LE(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun readFloat32LE(bytes: ByteArray, offset: Int): Float {
+        return Float.fromBits(readUInt32LE(bytes, offset))
+    }
+
+    private fun firmwareCalibrationCrc16(bytes: ByteArray): Int {
+        var crc = 0xFFFF
+        for (byte in bytes) {
+            crc = (((crc ushr 8) and 0x00FF) or ((crc shl 8) and 0xFFFF)) and 0xFFFF
+            crc = (crc xor (byte.toInt() and 0xFF)) and 0xFFFF
+            crc = (crc xor ((crc and 0x00FF) ushr 4)) and 0xFFFF
+            crc = (crc xor ((crc shl 8) shl 4)) and 0xFFFF
+            crc = (crc xor (((crc and 0x00FF) shl 4) shl 1)) and 0xFFFF
+        }
+        return crc and 0xFFFF
     }
 
     private fun startWarmupLifecycle() {
